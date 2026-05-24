@@ -5,4 +5,4 @@ if [ -f .env ]; then
   export $(grep -v '^#' .env | xargs)
 fi
 
-python src/generate_and_publish.py --action generate_and_publish --topic "Daily development insight - $(date +%F)" --publish_status draft --tags "programming,dev"
+python3 src/generate_and_publish.py --action generate --outdir posts --site_dir site

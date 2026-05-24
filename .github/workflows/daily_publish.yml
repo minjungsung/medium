@@ -18,7 +18,7 @@ jobs:
           pip install -r requirements.txt
       - name: Run generator and publish
         env:
-          # Medium Integration Token 발급이 막힌 경우가 많아서, 이 워크플로는 기본적으로 "생성"만 합니다.
+          # Many accounts cannot create Medium Integration Tokens anymore, so this workflow generates only.
           LLM_PROVIDER: github_models
           OPENAI_MODEL: ${{ secrets.OPENAI_MODEL || 'gpt-4o-mini' }}
           GITHUB_TOKEN: ${{ secrets.GH_MODELS_TOKEN }}

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Generate a dev article and (optionally) publish to Medium.
 
-Important:
-    Medium의 공식 Developer API(Integration Token)가 더 이상 발급되지 않는 계정/환경이 있습니다.
-    그런 경우에도 이 스크립트는 매일 글을 자동 생성해 파일로 저장할 수 있습니다.
+Note:
+    Medium's legacy Integration Token / Developer API may not be available for new users.
+    Even without a Medium token, this script can still generate a daily post and save it to files.
 
 Examples:
-    python src/generate_and_publish.py --action generate --topic "Asyncio 팁" --outdir posts
-    python src/generate_and_publish.py --action generate  --outdir posts   # topic 미지정 시 날짜 기반 토픽
-    python src/generate_and_publish.py --action publish --topic "Asyncio 팁" --publish_status draft
+    python src/generate_and_publish.py --action generate --topic "Asyncio tips" --outdir posts --site_dir site
+    python src/generate_and_publish.py --action generate --outdir posts --site_dir site  # auto topic
+    python src/generate_and_publish.py --action publish --topic "Asyncio tips" --publish_status draft
 """
 import os
 import argparse
@@ -49,8 +49,8 @@ def _make_client():
     if LLM_PROVIDER in ("github", "github_models", "gh", "github-models"):
         if not GITHUB_TOKEN:
             raise RuntimeError(
-                "LLM_PROVIDER=github_models 인데 GITHUB_TOKEN(또는 GH_MODELS_TOKEN)이 없습니다.\n"
-                "- GitHub Models 접근 권한이 있는 토큰을 환경변수로 설정하세요."
+                "LLM_PROVIDER=github_models but GITHUB_TOKEN (or GH_MODELS_TOKEN) is missing.\n"
+                "- Set a token that has access to GitHub Models in your environment variables."
             )
         return OpenAI(api_key=GITHUB_TOKEN, base_url=GITHUB_MODELS_BASE_URL)
 
@@ -68,9 +68,10 @@ else:  # pragma: no cover
 
 def generate_article(topic: str, audience: str = "developers", length: str = "~800 words") -> dict:
     system = (
-        "You are an expert technical writer. Produce a Medium-ready article in Korean about the given topic. "
-        "Write a catchy title, a short subtitle (1 sentence), and the article body. Use headings, code blocks if needed, and a concise conclusion. "
-        "Return only the article in markdown format."
+        "You are an expert technical writer. Produce a Medium-ready article in English about the given topic. "
+        "Write a catchy title, a short subtitle (1 sentence), and the article body. "
+        "Use headings, bullet lists when helpful, and code blocks if needed. End with a concise conclusion. "
+        "Return ONLY the article in Markdown format (no extra commentary)."
     )
 
     prompt = f"Topic: {topic}\nAudience: {audience}\nLength: {length}\nPlease produce: Title, Subtitle, Body (markdown)."
@@ -136,7 +137,7 @@ def extract_title(markdown: str) -> str:
 
 def _slugify(text: str) -> str:
     text = text.strip().lower()
-    text = re.sub(r"[^a-z0-9가-힣\s-]", "", text)
+    text = re.sub(r"[^a-z0-9\s-]", "", text)
     text = re.sub(r"\s+", "-", text)
     text = re.sub(r"-+", "-", text)
     return text.strip("-")[:80] or "post"
@@ -155,8 +156,8 @@ def save_markdown(outdir: str, title: str, markdown: str) -> str:
 
 
 def render_html(title: str, markdown_text: str) -> str:
-    # Medium에 붙여넣기/Import 할 때 제목이 중복되지 않도록,
-    # 본문 변환에서는 선두 H1을 제거하고 HTML 템플릿에서 제목을 한 번만 렌더링합니다.
+    # To make copy/paste & import easier, remove the first H1 from the Markdown
+    # and render a single <h1> in the HTML template.
     md_text = markdown_text.lstrip("\ufeff")
     lines = md_text.splitlines()
     i = 0
@@ -176,13 +177,13 @@ def render_html(title: str, markdown_text: str) -> str:
     safe_title = _html.escape(title)
     return (
         "<!doctype html>\n"
-        "<html lang=\"ko\">\n"
+        "<html lang=\"en\">\n"
         "<head>\n"
         "  <meta charset=\"utf-8\"/>\n"
         "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>\n"
         f"  <title>{safe_title}</title>\n"
         "  <style>\n"
-        "    /* Copy/Paste/Import 친화적인 최소 스타일 */\n"
+        "    /* Minimal styles for copy/paste/import */\n"
         "    body { margin: 0; font: 16px/1.7 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #111; }\n"
         "    main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }\n"
         "    article > h1 { margin: 0 0 16px; line-height: 1.2; }\n"
@@ -234,7 +235,7 @@ def build_site_index(posts_dir: str, site_dir: str, limit: int = 60) -> str:
 
     index_html = (
         "<!doctype html>\n"
-        "<html lang=\"ko\">\n"
+        "<html lang=\"en\">\n"
         "<head>\n"
         "  <meta charset=\"utf-8\"/>\n"
         "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>\n"
@@ -250,7 +251,7 @@ def build_site_index(posts_dir: str, site_dir: str, limit: int = 60) -> str:
         "<body>\n"
         "  <main>\n"
         "    <h1>Daily Dev Posts</h1>\n"
-        "    <p>자동 생성된 글 목록입니다. Medium에 올릴 때는 본문을 복사/붙여넣기 하거나 Import에 활용하세요.</p>\n"
+        "    <p>Auto-generated posts. Copy/paste into Medium, or use Medium import if available.</p>\n"
         "    <ul>\n"
         f"{li}\n"
         "    </ul>\n"
@@ -266,7 +267,7 @@ def build_site_index(posts_dir: str, site_dir: str, limit: int = 60) -> str:
 
 def default_topic() -> str:
     today = _dt.date.today().isoformat()
-    return f"오늘의 개발 팁 ({today})"
+    return f"Daily development insight ({today})"
 
 
 def main():
@@ -299,8 +300,8 @@ def main():
     if not MEDIUM_TOKEN:
         raise RuntimeError(
             "MEDIUM_INTEGRATION_TOKEN not set.\n"
-            "- Medium에서 Integration Token 발급 UI가 사라진 경우, API로 자동 업로드가 불가합니다.\n"
-            "- 대신 생성된 파일(posts/*.md)을 Medium 에디터에 붙여넣거나 'Import story'로 가져오는 방식을 사용하세요."
+            "- If Medium Integration Tokens are not available for your account, automated publishing via API is not possible.\n"
+            "- Use the generated files (posts/*.md or site/posts/*.html) and paste/import into Medium."
         )
     user_id = get_medium_user_id(MEDIUM_TOKEN)
     tags = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else None
