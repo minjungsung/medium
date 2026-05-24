@@ -10,8 +10,10 @@
 빠른 시작
 1. `.env`를 만들고 다음 값을 설정하세요:
 
-- `OPENAI_API_KEY` — OpenAI 호환 키
+- `LLM_PROVIDER` — `openai` 또는 `github_models`
 - `OPENAI_MODEL` — 사용할 모델 (예: gpt-4o-mini 또는 환경 기본)
+- `OPENAI_API_KEY` — (LLM_PROVIDER=openai일 때) OpenAI 호환 키
+- `GITHUB_TOKEN` — (LLM_PROVIDER=github_models일 때) GitHub Models 접근 토큰
 - `MEDIUM_INTEGRATION_TOKEN` — Medium Integration Token (레거시: 계정에 따라 신규 발급이 불가할 수 있음)
 
 2. 의존성 설치:
@@ -47,5 +49,9 @@ Medium에 올리는 방법(토큰 없을 때)
 
 보안
 - API 키와 토큰은 절대 공개 저장소에 저장하지 마세요. `.env` 사용을 권장합니다.
+
+"GitHub Copilot로" 생성하고 싶을 때
+- Copilot Chat 자체를 외부 스크립트에서 호출하는 공식 공개 API는 일반적으로 제공되지 않습니다.
+- 대신 GitHub가 제공하는 OpenAI-호환 "GitHub Models" 엔드포인트를 사용하면 `GITHUB_TOKEN`으로 글 생성 자동화를 구성할 수 있습니다.
 
 더 원하는 기능 (예): 태그 자동 생성, SEO 제목/요약 자동 생성, 자동 공개 게시 등 — 원하시면 추가합니다.

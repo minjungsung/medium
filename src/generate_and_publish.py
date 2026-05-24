@@ -34,11 +34,32 @@ load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai").strip().lower()
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN") or os.getenv("GH_MODELS_TOKEN")
+GITHUB_MODELS_BASE_URL = os.getenv("GITHUB_MODELS_BASE_URL", "https://models.inference.ai.azure.com")
 MEDIUM_TOKEN = os.getenv("MEDIUM_INTEGRATION_TOKEN")
 DEFAULT_PUBLISH_STATUS = os.getenv("DEFAULT_PUBLISH_STATUS", "draft")
 
+def _make_client():
+    if not _OPENAI_V1:
+        return None
+
+    if LLM_PROVIDER in ("github", "github_models", "gh", "github-models"):
+        if not GITHUB_TOKEN:
+            raise RuntimeError(
+                "LLM_PROVIDER=github_models 인데 GITHUB_TOKEN(또는 GH_MODELS_TOKEN)이 없습니다.\n"
+                "- GitHub Models 접근 권한이 있는 토큰을 환경변수로 설정하세요."
+            )
+        return OpenAI(api_key=GITHUB_TOKEN, base_url=GITHUB_MODELS_BASE_URL)
+
+    # default: OpenAI
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY not set in env")
+    return OpenAI(api_key=OPENAI_API_KEY)
+
+
 if _OPENAI_V1:
-    _client = OpenAI(api_key=OPENAI_API_KEY)
+    _client = _make_client()
 else:  # pragma: no cover
     openai.api_key = OPENAI_API_KEY  # type: ignore
 

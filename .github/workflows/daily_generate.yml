@@ -26,8 +26,12 @@ jobs:
 
       - name: Generate post
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # Choose provider by setting secrets (recommended: GitHub Models)
+          LLM_PROVIDER: ${{ secrets.LLM_PROVIDER }}
           OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GH_MODELS_TOKEN }}
+          GITHUB_MODELS_BASE_URL: ${{ secrets.GITHUB_MODELS_BASE_URL }}
         run: |
           python src/generate_and_publish.py --action generate --outdir posts --site_dir site
 
