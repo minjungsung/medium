@@ -64,6 +64,17 @@ Medium has a legacy Integration Token / Developer API, but many accounts can no 
 python3 src/generate_and_publish.py --action publish --topic "Asyncio tips" --publish_status draft
 ```
 
+## Formatting in Medium (Markdown vs HTML)
+
+Medium's editor is not a full Markdown editor. Depending on how you paste, code indentation and quotes can get mangled.
+
+Recommended options:
+
+- Best: deploy `site/` to GitHub Pages and use the generated HTML (`site/posts/*.html`) as your source for Medium import/copy.
+- If you paste Markdown from `posts/*.md`, make sure code blocks stay inside fenced code blocks (```python) and avoid smart quotes.
+
+This repo also normalizes smart quotes/dashes inside fenced code blocks to reduce copy/paste issues.
+
 ## English-only output
 
 The generator is configured to produce articles in **English only**.

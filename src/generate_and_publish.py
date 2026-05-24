@@ -82,6 +82,12 @@ def generate_article(topic: str, audience: str = "senior software engineers", le
         "- Include at least 1 'Observability' section: metrics, logs, traces, and what to alert on.\n"
         "- End with a short checklist that an experienced engineer can apply tomorrow.\n"
         "\n\n"
+        "Code requirements (critical):\n"
+        "- Code must be properly indented and copy/paste runnable.\n"
+        "- Use ONLY straight ASCII quotes in code: ' and \". Never use smart quotes (e.g. “ ” ‘ ’).\n"
+        "- Use fenced code blocks with language tags, e.g. ```python or ```sql.\n"
+        "- Do not include pseudo-code inside code fences; if you need pseudo-code, write it outside fences.\n"
+        "\n\n"
         "Format requirements:\n"
         "- Start with: '# <Title>' then a one-sentence subtitle in italics.\n"
         "- Use headings with clear section titles.\n"
@@ -123,7 +129,45 @@ def generate_article(topic: str, audience: str = "senior software engineers", le
         text = resp["choices"][0]["message"]["content"].strip()
 
     # A simple split: consider first heading as title if present
-    return {"markdown": text}
+    return {"markdown": normalize_markdown_for_medium(text)}
+
+
+def normalize_markdown_for_medium(markdown_text: str) -> str:
+    """Best-effort normalization for copy/paste into Medium.
+
+    Medium's editor can behave poorly with smart quotes and some unicode punctuation inside code fences.
+    This function only normalizes inside fenced code blocks and leaves prose untouched.
+    """
+
+    replacements = {
+        "\u2018": "'",  # ‘
+        "\u2019": "'",  # ’
+        "\u201C": '"',  # “
+        "\u201D": '"',  # ”
+        "\u2013": "-",  # –
+        "\u2014": "-",  # —
+        "\u00A0": " ",  # nbsp
+    }
+
+    def _replace_chars(s: str) -> str:
+        for old, new in replacements.items():
+            s = s.replace(old, new)
+        return s
+
+    lines = markdown_text.splitlines()
+    out = []
+    in_fence = False
+    fence = "```"
+
+    for line in lines:
+        if line.strip().startswith(fence):
+            in_fence = not in_fence
+            out.append(line)
+            continue
+
+        out.append(_replace_chars(line) if in_fence else line)
+
+    return "\n".join(out).strip() + "\n"
 
 
 def get_medium_user_id(token: str) -> str:
