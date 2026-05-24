@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Making Microservices Survivable: Timeouts, Hedged Requests, Circuit Breakers, and Fallbacks</title>
+  <style>
+    /* Minimal styles for copy/paste/import */
+    body { margin: 0; font: 16px/1.7 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #111; }
+    main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+    article > h1 { margin: 0 0 16px; line-height: 1.2; }
+    pre { overflow: auto; padding: 12px; background: #f6f8fa; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.95em; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: 6px 8px; }
+    a { word-break: break-word; }
+  </style>
+</head>
+<body>
+  <main>
+    <article>
+      <h1>Making Microservices Survivable: Timeouts, Hedged Requests, Circuit Breakers, and Fallbacks</h1>
+      <p><em>Strategies to enhance resilience in distributed systems.</em></p>
+<h2>Thesis</h2>
+<p>In a microservices architecture, ensuring survivability requires a multifaceted approach that incorporates timeouts, hedged requests, circuit breakers, and fallbacks. This article will explore how to implement these strategies in a hypothetical e-commerce system where a product catalog microservice must maintain availability and performance under load and potential failure scenarios.</p>
+<h2>Constraints and Design Considerations</h2>
+<p>When designing a resilient system, we must consider the following constraints:</p>
+<ol>
+<li><strong>Network Latency and Reliability</strong>: Microservices communicate over the network, which is inherently unreliable. Timeouts must be defined to prevent cascading failures.</li>
+<li><strong>Load Variability</strong>: Traffic spikes during peak hours (e.g., sales events) necessitate mechanisms to handle increased load without degrading user experience.</li>
+<li><strong>Dependency Chains</strong>: The product catalog service relies on multiple other services (e.g., pricing, inventory). A failure in one of these can affect overall availability.</li>
+<li><strong>Cost of Resilience</strong>: Implementing resilience features incurs a performance and resource cost. We need to balance robustness with system efficiency.</li>
+</ol>
+<p>To address these constraints, we can design our system to utilize timeouts, hedged requests, circuit breakers, and fallbacks.</p>
+<h3>Implementation Overview</h3>
+<h4>Timeouts</h4>
+<p>Timeouts are a first line of defense against unresponsive services. They allow the system to fail gracefully instead of waiting indefinitely. In our product catalog service, we set a timeout for external calls to the pricing service.</p>
+<pre><code class="language-python">import requests
+from requests.exceptions import Timeout
+
+def get_product_price(product_id):
+    try:
+        response = requests.get(f&quot;http://pricing-service/products/{product_id}&quot;, timeout=2.0)
+        response.raise_for_status()
+        return response.json()['price']
+    except Timeout:
+        log(&quot;Pricing service timeout&quot;)
+        return None
+    except Exception as e:
+        log(f&quot;Error fetching price: {e}&quot;)
+        return None
+</code></pre>
+<p>In this example, we define a 2-second timeout. If the pricing service does not respond in that time, we log the event and return <code>None</code>.</p>
+<h4>Hedged Requests</h4>
+<p>While timeouts help, they do not solve the problem of a slow service that eventually responds. Hedged requests can mitigate this by sending multiple requests simultaneously and taking the first successful response. This is particularly useful for external services that may have variable response times.</p>
+<pre><code class="language-python">import concurrent.futures
+
+def hedged_price_request(product_id):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        futures = {executor.submit(get_product_price, product_id): i for i in range(2)}
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                price = future.result()
+                if price is not None:
+                    return price
+            except Exception as e:
+                log(f&quot;Hedged request error: {e}&quot;)
+    return None
+</code></pre>
+<p>Here, we use <code>ThreadPoolExecutor</code> to send two parallel requests for the product price. The first successful response will be returned, while others will be canceled.</p>
+<h4>Circuit Breakers</h4>
+<p>Circuit breakers prevent the application from making repeated requests to a failing service, allowing it to recover. We can implement a simple circuit breaker for the pricing service.</p>
+<pre><code class="language-python">import time
+
+class CircuitBreaker:
+    def __init__(self, failure_threshold=3, recovery_time=10):
+        self.failure_count = 0
+        self.state = 'CLOSED'
+        self.failure_threshold = failure_threshold
+        self.recovery_time = recovery_time
+        self.last_failure_time = None
+
+    def call(self, func, *args, **kwargs):
+        if self.state == 'OPEN':
+            if time.time() - self.last_failure_time &gt; self.recovery_time:
+                self.state = 'HALF_OPEN'
+            else:
+                log(&quot;Circuit is open; rejecting request.&quot;)
+                return None
+
+        try:
+            result = func(*args, **kwargs)
+            self.failure_count = 0
+            if self.state == 'HALF_OPEN':
+                self.state = 'CLOSED'
+            return result
+        except Exception as e:
+            self.failure_count += 1
+            log(f&quot;Circuit breaker triggered: {e}&quot;)
+            if self.failure_count &gt;= self.failure_threshold:
+                self.state = 'OPEN'
+                self.last_failure_time = time.time()
+            return None
+
+circuit_breaker = CircuitBreaker()
+
+def get_price_with_circuit_breaker(product_id):
+    return circuit_breaker.call(get_product_price, product_id)
+</code></pre>
+<p>In this implementation, the circuit breaker transitions between <code>CLOSED</code>, <code>OPEN</code>, and <code>HALF_OPEN</code> states based on the success or failure of requests. It provides a mechanism to back off from a failing service.</p>
+<h4>Fallbacks</h4>
+<p>Even with circuit breakers, there may be times when the service is completely unavailable. In these cases, we can implement fallback strategies to serve cached data or default responses.</p>
+<pre><code class="language-python">def get_price_with_fallback(product_id):
+    price = get_price_with_circuit_breaker(product_id)
+    if price is None:
+        return get_cached_price(product_id)  # Fallback to cached data or defaults
+    return price
+</code></pre>
+<p>In this function, if the circuit breaker returns <code>None</code>, we fall back to a cached price. This ensures that the user still receives some response, even if it is not the latest data.</p>
+<h2>Performance and Cost</h2>
+<p>Implementing these resilience patterns comes with trade-offs. For instance, hedged requests can increase the load on the pricing service, leading to higher latency. In a system where requests to the pricing service average 100ms, a hedged request could double that latency during peak times.</p>
+<p>Let's illustrate some hypothetical numbers:</p>
+<ul>
+<li><strong>Normal Load</strong>: 100 requests/sec to pricing service, average response time of 100ms.</li>
+<li><strong>With Hedged Requests</strong>: Potentially increases to 200 requests/sec, with 150ms average response time.</li>
+</ul>
+<p>The cost implications extend to cloud resources as well. If we assume that each request costs $0.001, under normal load, the cost is $0.1 per second. With hedged requests, costs could double to $0.2 per second. These figures highlight the importance of monitoring and alerting on resource usage.</p>
+<h2>Failure Modes &amp; Debugging</h2>
+<h3>Common Symptoms</h3>
+<ol>
+<li><strong>Increased Latency</strong>: If the service starts responding slowly, it could indicate a circuit breaker is open or the hedged requests are overwhelming the pricing service.</li>
+<li><strong>Repeated Timeouts</strong>: If timeouts occur frequently, it may be a sign of an overloaded service or network issues.</li>
+<li><strong>Service Unavailability</strong>: If the service returns <code>None</code> for all requests, the circuit breaker is likely in</li>
+</ol>
+    </article>
+  </main>
+</body>
+</html>
