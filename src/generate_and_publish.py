@@ -66,15 +66,39 @@ else:  # pragma: no cover
     openai.api_key = OPENAI_API_KEY  # type: ignore
 
 
-def generate_article(topic: str, audience: str = "developers", length: str = "~800 words") -> dict:
+def generate_article(topic: str, audience: str = "senior software engineers", length: str = "~1400-1800 words") -> dict:
     system = (
-        "You are an expert technical writer. Produce a Medium-ready article in English about the given topic. "
-        "Write a catchy title, a short subtitle (1 sentence), and the article body. "
-        "Use headings, bullet lists when helpful, and code blocks if needed. End with a concise conclusion. "
-        "Return ONLY the article in Markdown format (no extra commentary)."
+        "You are a staff-level software engineer and technical writer. "
+        "Write a Medium-ready article IN ENGLISH about the given topic, aimed at readers with ~10+ years of experience. "
+        "Assume the reader already knows the basics; do not explain fundamentals. "
+        "Avoid generic advice and motivational filler. Every section must include actionable, technical details. "
+        "\n\n"
+        "Hard requirements:\n"
+        "- Provide a strong, specific thesis (not a list of tips).\n"
+        "- Include at least 2 code blocks that demonstrate non-trivial implementation details.\n"
+        "- Include at least 1 'Failure modes & debugging' section with concrete symptoms and diagnoses.\n"
+        "- Include at least 1 'Trade-offs' section with when NOT to use the approach.\n"
+        "- Include at least 1 'Performance & cost' section (latency, throughput, memory, or cloud cost), using clearly-labeled illustrative numbers if needed.\n"
+        "- Include at least 1 'Observability' section: metrics, logs, traces, and what to alert on.\n"
+        "- End with a short checklist that an experienced engineer can apply tomorrow.\n"
+        "\n\n"
+        "Format requirements:\n"
+        "- Start with: '# <Title>' then a one-sentence subtitle in italics.\n"
+        "- Use headings with clear section titles.\n"
+        "- Keep it dense and technical.\n"
+        "- Return ONLY the article in Markdown."
     )
 
-    prompt = f"Topic: {topic}\nAudience: {audience}\nLength: {length}\nPlease produce: Title, Subtitle, Body (markdown)."
+    prompt = (
+        f"Topic: {topic}\n"
+        f"Audience: {audience}\n"
+        f"Target length: {length}\n\n"
+        "Write with these additional constraints:\n"
+        "- Prefer a single focused scenario (one system / one workload) and go deep.\n"
+        "- Show the reasoning chain explicitly (constraints -> design -> implementation -> validation).\n"
+        "- If you make assumptions, state them. Do not invent citations or claim you ran benchmarks.\n"
+        "- Use examples that would survive code review in a production codebase.\n"
+    )
 
     messages = [
         {"role": "system", "content": system},
@@ -266,8 +290,24 @@ def build_site_index(posts_dir: str, site_dir: str, limit: int = 60) -> str:
 
 
 def default_topic() -> str:
-    today = _dt.date.today().isoformat()
-    return f"Daily development insight ({today})"
+    today = _dt.date.today()
+    topics = [
+        "Designing idempotent APIs under at-least-once delivery (retries, dedup keys, and failure semantics)",
+        "Advanced caching in distributed systems: stampede prevention, negative caching, and consistency trade-offs",
+        "Debugging production latency: percentile thinking, tail amplification, and tracing-driven optimization",
+        "Backpressure end-to-end: from load balancers to queues to thread pools",
+        "PostgreSQL performance deep dive: indexing strategy, query plans, and lock contention patterns",
+        "Concurrency in Python beyond the basics: asyncio pitfalls, structured concurrency, and cancellation safety",
+        "Observability that actually works: SLOs, error budgets, and high-signal alert design",
+        "Schema migrations at scale: online changes, dual writes, and rollback strategies",
+        "Making microservices survivable: timeouts, hedged requests, circuit breakers, and fallbacks",
+        "Reliable event-driven systems: ordering, exactly-once illusions, and consumer reprocessing",
+        "Incident response for engineers: fast containment, safe rollbacks, and learning without blame",
+        "Cost-aware engineering: measuring and reducing cloud spend without hurting reliability",
+    ]
+
+    topic = topics[today.toordinal() % len(topics)]
+    return f"{topic} ({today.isoformat()})"
 
 
 def main():
