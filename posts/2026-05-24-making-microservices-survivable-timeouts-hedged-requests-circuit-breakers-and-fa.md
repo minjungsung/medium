@@ -1,142 +1,144 @@
-# Making Microservices Survivable: Timeouts, Hedged Requests, Circuit Breakers, and Fallbacks
-*Strategies to enhance resilience in distributed systems.*
+# Making Microservices Survivable: Timeouts, Hedged Requests, Circuit Breakers, and Fallbacks  
+*Strategies to enhance resilience in microservices architecture.*
 
-## Thesis
-
-In a microservices architecture, ensuring survivability requires a multifaceted approach that incorporates timeouts, hedged requests, circuit breakers, and fallbacks. This article will explore how to implement these strategies in a hypothetical e-commerce system where a product catalog microservice must maintain availability and performance under load and potential failure scenarios.
+## Thesis Statement
+In a microservices architecture, designing for survivability is paramount to maintain system reliability under failure conditions. By effectively implementing timeouts, hedged requests, circuit breakers, and fallbacks within a service-focused scenario, we can significantly enhance resilience and ensure continued service availability.
 
 ## Constraints and Design Considerations
+When designing resilient microservices, we must consider the following constraints:
 
-When designing a resilient system, we must consider the following constraints:
+1. **Latency Sensitivity**: The system must remain responsive under varying load conditions. A latency threshold should be defined based on service-level objectives (SLOs).
+2. **Dependency Changes**: Microservices often rely on other services, which may experience varying levels of availability.
+3. **Resource Limits**: Memory and CPU usage must be monitored to prevent resource exhaustion.
 
-1. **Network Latency and Reliability**: Microservices communicate over the network, which is inherently unreliable. Timeouts must be defined to prevent cascading failures.
-2. **Load Variability**: Traffic spikes during peak hours (e.g., sales events) necessitate mechanisms to handle increased load without degrading user experience.
-3. **Dependency Chains**: The product catalog service relies on multiple other services (e.g., pricing, inventory). A failure in one of these can affect overall availability.
-4. **Cost of Resilience**: Implementing resilience features incurs a performance and resource cost. We need to balance robustness with system efficiency.
+Given these constraints, we will implement a microservice that consumes a weather API to provide weather data for a travel application. The system will incorporate timeouts, hedged requests, circuit breakers, and fallbacks to ensure resilience.
 
-To address these constraints, we can design our system to utilize timeouts, hedged requests, circuit breakers, and fallbacks.
+### Architectural Overview
+In our microservice architecture, we will deploy:
+- **Service A**: The client service that makes requests to the weather API.
+- **Service B**: The weather API service.
 
-### Implementation Overview
+The design will use:
+- **Timeouts**: To prevent long wait times for responses.
+- **Hedged Requests**: To mitigate latency by sending multiple requests to different instances of the API.
+- **Circuit Breakers**: To prevent failure propagation.
+- **Fallbacks**: To provide alternative behaviors when the primary service fails.
 
-#### Timeouts
+## Implementation Details
 
-Timeouts are a first line of defense against unresponsive services. They allow the system to fail gracefully instead of waiting indefinitely. In our product catalog service, we set a timeout for external calls to the pricing service.
+### 1. Timeouts
+We will set a timeout for requests to the weather API. This is critical to avoid waiting indefinitely for a response.
 
 ```python
 import requests
 from requests.exceptions import Timeout
 
-def get_product_price(product_id):
+def get_weather_data(api_url):
     try:
-        response = requests.get(f"http://pricing-service/products/{product_id}", timeout=2.0)
+        response = requests.get(api_url, timeout=2)  # 2 seconds timeout
         response.raise_for_status()
-        return response.json()['price']
+        return response.json()
     except Timeout:
-        log("Pricing service timeout")
-        return None
-    except Exception as e:
-        log(f"Error fetching price: {e}")
-        return None
+        return {"error": "Request timed out"}
+    except requests.RequestException as e:
+        return {"error": str(e)}
 ```
 
-In this example, we define a 2-second timeout. If the pricing service does not respond in that time, we log the event and return `None`.
-
-#### Hedged Requests
-
-While timeouts help, they do not solve the problem of a slow service that eventually responds. Hedged requests can mitigate this by sending multiple requests simultaneously and taking the first successful response. This is particularly useful for external services that may have variable response times.
+### 2. Hedged Requests
+To further mitigate latency, we can implement hedged requests. This involves sending multiple requests to different instances of the weather API and returning the first successful response.
 
 ```python
 import concurrent.futures
 
-def hedged_price_request(product_id):
+def get_weather_hedged(api_urls):
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        futures = {executor.submit(get_product_price, product_id): i for i in range(2)}
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                price = future.result()
-                if price is not None:
-                    return price
-            except Exception as e:
-                log(f"Hedged request error: {e}")
-    return None
+        future_to_url = {executor.submit(get_weather_data, url): url for url in api_urls}
+        for future in concurrent.futures.as_completed(future_to_url):
+            result = future.result()
+            if "error" not in result:
+                return result
+    return {"error": "All requests failed"}
 ```
 
-Here, we use `ThreadPoolExecutor` to send two parallel requests for the product price. The first successful response will be returned, while others will be canceled.
-
-#### Circuit Breakers
-
-Circuit breakers prevent the application from making repeated requests to a failing service, allowing it to recover. We can implement a simple circuit breaker for the pricing service.
+### 3. Circuit Breakers
+To prevent flooding the weather API with requests during failures, we can implement a circuit breaker pattern.
 
 ```python
 import time
 
 class CircuitBreaker:
-    def __init__(self, failure_threshold=3, recovery_time=10):
+    def __init__(self, failure_threshold=3, recovery_timeout=10):
         self.failure_count = 0
-        self.state = 'CLOSED'
         self.failure_threshold = failure_threshold
-        self.recovery_time = recovery_time
+        self.state = "CLOSED"
+        self.recovery_timeout = recovery_timeout
         self.last_failure_time = None
 
     def call(self, func, *args, **kwargs):
-        if self.state == 'OPEN':
-            if time.time() - self.last_failure_time > self.recovery_time:
-                self.state = 'HALF_OPEN'
+        if self.state == "OPEN":
+            if time.time() - self.last_failure_time > self.recovery_timeout:
+                self.state = "HALF_OPEN"
             else:
-                log("Circuit is open; rejecting request.")
-                return None
-        
+                return {"error": "Circuit is open"}
+
         try:
             result = func(*args, **kwargs)
-            self.failure_count = 0
-            if self.state == 'HALF_OPEN':
-                self.state = 'CLOSED'
+            self.reset()
             return result
-        except Exception as e:
-            self.failure_count += 1
-            log(f"Circuit breaker triggered: {e}")
-            if self.failure_count >= self.failure_threshold:
-                self.state = 'OPEN'
-                self.last_failure_time = time.time()
-            return None
+        except Exception:
+            self.record_failure()
+            return {"error": "Service unavailable"}
 
-circuit_breaker = CircuitBreaker()
+    def record_failure(self):
+        self.failure_count += 1
+        self.last_failure_time = time.time()
+        if self.failure_count >= self.failure_threshold:
+            self.state = "OPEN"
 
-def get_price_with_circuit_breaker(product_id):
-    return circuit_breaker.call(get_product_price, product_id)
+    def reset(self):
+        self.failure_count = 0
+        self.state = "CLOSED"
 ```
 
-In this implementation, the circuit breaker transitions between `CLOSED`, `OPEN`, and `HALF_OPEN` states based on the success or failure of requests. It provides a mechanism to back off from a failing service.
-
-#### Fallbacks
-
-Even with circuit breakers, there may be times when the service is completely unavailable. In these cases, we can implement fallback strategies to serve cached data or default responses.
+### 4. Fallbacks
+Finally, we can implement a fallback mechanism to provide alternative data or behavior when the primary service fails.
 
 ```python
-def get_price_with_fallback(product_id):
-    price = get_price_with_circuit_breaker(product_id)
-    if price is None:
-        return get_cached_price(product_id)  # Fallback to cached data or defaults
-    return price
+def fallback_weather_data():
+    return {"data": "Fallback weather data"}
+
+def get_weather_with_fallback(api_urls, circuit_breaker):
+    result = circuit_breaker.call(get_weather_hedged, api_urls)
+    if "error" in result:
+        return fallback_weather_data()
+    return result
 ```
 
-In this function, if the circuit breaker returns `None`, we fall back to a cached price. This ensures that the user still receives some response, even if it is not the latest data.
+## Validation and Testing
+To validate the implementation, we will conduct chaos testing to simulate service outages. We will intentionally induce failures in the weather API to ensure the circuit breaker and fallback mechanisms respond as expected.
 
-## Performance and Cost
+### Failure Modes & Debugging
+**Symptoms**: The service becomes slow to respond or starts returning errors.
 
-Implementing these resilience patterns comes with trade-offs. For instance, hedged requests can increase the load on the pricing service, leading to higher latency. In a system where requests to the pricing service average 100ms, a hedged request could double that latency during peak times.
+**Diagnosis**:
+1. **Timeouts**: If the service frequently returns timeout errors, the API may be overloaded or unresponsive.
+2. **Circuit Breaker State**: Check the state of the circuit breaker. If it is open, the service is temporarily blocked from making requests.
+3. **Fallback Behavior**: Monitor how often the fallback data is returned. Frequent fallbacks may indicate issues with the primary service.
 
-Let's illustrate some hypothetical numbers:
+### Trade-offs
+While the above approaches enhance resilience, they come with trade-offs:
+- **Increased Complexity**: The introduction of circuit breakers and hedged requests adds complexity to the codebase.
+- **Resource Usage**: Hedged requests may lead to increased resource consumption due to multiple simultaneous requests.
+- **Latency**: If not configured carefully, timeouts could lead to increased latency if the system frequently oscillates between states.
 
-- **Normal Load**: 100 requests/sec to pricing service, average response time of 100ms.
-- **With Hedged Requests**: Potentially increases to 200 requests/sec, with 150ms average response time.
+**When Not to Use**:
+- For simple applications with low traffic and minimal dependencies, implementing such patterns may be overkill.
+- In cases where the service can afford to block indefinitely (e.g., internal APIs), timeouts may not be necessary.
 
-The cost implications extend to cloud resources as well. If we assume that each request costs $0.001, under normal load, the cost is $0.1 per second. With hedged requests, costs could double to $0.2 per second. These figures highlight the importance of monitoring and alerting on resource usage.
+## Performance & Cost
+Assuming our service makes 100 requests per second to the weather API:
+- **Without Timeouts**: If each request takes 5 seconds on average, the service would experience significant latency, potentially leading to timeouts on the client side.
+- **With Timeouts**: Setting a timeout of 2 seconds allows the service to recover quickly from unresponsive APIs, maintaining an average response time of ~2 seconds.
+- **Hedged Requests**: Sending two hedged requests could double the network cost but reduce the average response time to <2 seconds when one of the requests succeeds.
 
-## Failure Modes & Debugging
-
-### Common Symptoms
-
-1. **Increased Latency**: If the service starts responding slowly, it could indicate a circuit breaker is open or the hedged requests are overwhelming the pricing service.
-2. **Repeated Timeouts**: If timeouts occur frequently, it may be a sign of an overloaded service or network issues.
-3. **Service Unavailability**: If the service returns `None` for all requests, the circuit breaker is likely in
+For cloud costs, consider the implications of increased API calls. If each API call costs $0.01, hedging requests could lead to a 100% increase in costs, but the trade-off
