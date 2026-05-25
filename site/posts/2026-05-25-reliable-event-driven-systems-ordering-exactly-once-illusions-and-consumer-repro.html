@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Reliable Event-Driven Systems: Ordering, Exactly-Once Illusions, and Consumer Reprocessing</title>
+  <style>
+    /* Minimal styles for copy/paste/import */
+    body { margin: 0; font: 16px/1.7 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #111; }
+    main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+    article > h1 { margin: 0 0 16px; line-height: 1.2; }
+    pre { overflow: auto; padding: 12px; background: #f6f8fa; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.95em; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: 6px 8px; }
+    a { word-break: break-word; }
+  </style>
+</head>
+<body>
+  <main>
+    <article>
+      <h1>Reliable Event-Driven Systems: Ordering, Exactly-Once Illusions, and Consumer Reprocessing</h1>
+      <p><em>Building robust architectures for high-stakes financial transactions.</em></p>
+<p>In an era where event-driven architectures are the backbone of scalable systems, the need for reliable event processing cannot be overstated. This article delves into the intricacies of designing a reliable event-driven system focused on financial transactions, addressing challenges such as message ordering, achieving exactly-once delivery, and reprocessing consumers. The goal is to provide a concrete framework that seasoned engineers can implement to ensure data integrity and reliability in their systems.</p>
+<h2>Constraints</h2>
+<p>For our scenario, we are designing a payment processing system that handles financial transactions in real-time. This system must adhere to the following constraints:</p>
+<ol>
+<li><strong>Ordering</strong>: The order of transactions must be preserved; a transaction that credits an account must be processed before a subsequent transaction that debits it.</li>
+<li><strong>Exactly-Once Delivery</strong>: Each transaction event must be processed exactly once to prevent double charging or missed payments.</li>
+<li><strong>Consumer Reprocessing</strong>: In case of failure, the system must allow consumers to reprocess events without side effects.</li>
+</ol>
+<p>Assuming we are using Apache Kafka as our message broker, we will explore how to implement these requirements effectively.</p>
+<h2>Design</h2>
+<h3>Event Structure</h3>
+<p>Each transaction can be represented as an event with the following structure:</p>
+<pre><code class="language-json">{
+  &quot;transactionId&quot;: &quot;unique-id-123&quot;,
+  &quot;accountId&quot;: &quot;account-id-456&quot;,
+  &quot;amount&quot;: 100.00,
+  &quot;type&quot;: &quot;credit&quot;, // or &quot;debit&quot;
+  &quot;timestamp&quot;: &quot;2026-05-25T10:00:00Z&quot;
+}
+</code></pre>
+<h3>Kafka Configuration</h3>
+<p>To maintain message ordering, we will partition our Kafka topic by account ID. This ensures that all transactions for a specific account are processed sequentially. Here's how to configure the producer:</p>
+<pre><code class="language-python">from kafka import KafkaProducer
+import json
+
+producer = KafkaProducer(
+    bootstrap_servers='localhost:9092',
+    value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+)
+
+def send_transaction(event):
+    producer.send(&quot;transactions&quot;, key=event[&quot;accountId&quot;].encode('utf-8'), value=event)
+    producer.flush()
+</code></pre>
+<h3>Idempotent Consumers</h3>
+<p>To achieve exactly-once delivery, we need to ensure the consumers are idempotent. This can be accomplished by maintaining a state that tracks processed transactions. Here's an example consumer implementation:</p>
+<pre><code class="language-python">from kafka import KafkaConsumer
+import json
+import psycopg2
+
+# Database connection for tracking processed transactions
+conn = psycopg2.connect(&quot;dbname=transactions user=postgres password=secret&quot;)
+cur = conn.cursor()
+
+consumer = KafkaConsumer(
+    &quot;transactions&quot;,
+    bootstrap_servers='localhost:9092',
+    group_id=&quot;payment-processing&quot;,
+    auto_offset_reset='earliest',
+)
+
+def process_transaction(event):
+    transaction_id = event['transactionId']
+
+    # Check if transaction has already been processed
+    cur.execute(&quot;SELECT COUNT(*) FROM processed_transactions WHERE transaction_id = %s&quot;, (transaction_id,))
+    if cur.fetchone()[0] &gt; 0:
+        return  # Ignore already processed transaction
+
+    # Process the transaction logic here (update account balances, etc.)
+    # ...
+
+    # Mark transaction as processed
+    cur.execute(&quot;INSERT INTO processed_transactions (transaction_id) VALUES (%s)&quot;, (transaction_id,))
+    conn.commit()
+
+for message in consumer:
+    event = json.loads(message.value)
+    process_transaction(event)
+</code></pre>
+<h2>Validation</h2>
+<h3>Testing Message Ordering</h3>
+<p>To validate that our system maintains message ordering, we can simulate concurrent transactions and check the account state after processing. Create a set of transactions for a single account and assert their final state. Use unit tests or integration tests to verify this behavior.</p>
+<h3>Ensuring Exactly-Once Processing</h3>
+<p>We can write unit tests that attempt to re-process the same transaction and confirm that the state remains unchanged. This can be validated by inserting mock transactions and asserting that the transaction count does not increase for duplicates.</p>
+<h2>Performance &amp; Cost</h2>
+<h3>Latency and Throughput</h3>
+<p>With our current setup, we can expect some latency due to the database interactions for tracking processed transactions. Assume:</p>
+<ul>
+<li>Each transaction processing takes an average of 5ms.</li>
+<li>The consumer can handle about 200 messages per second.</li>
+</ul>
+<p>The throughput can be calculated as follows:</p>
+<ul>
+<li>If we process 200 messages/second, that translates to about 1,200 transactions per minute, equating to approximately 1.7 million transactions per day.</li>
+</ul>
+<h3>Cloud Costs</h3>
+<p>If deployed on a cloud provider, consider the following costs:</p>
+<ul>
+<li><strong>Kafka Costs</strong>: Running a managed Kafka service could cost around $0.10 per GB of data. If each transaction is approximately 1 KB, that results in about 1.7 GB/day, costing about $0.17/day.</li>
+<li><strong>Database Costs</strong>: Depending on your database choice, costs could vary significantly. A PostgreSQL instance could cost around $0.20/hour, leading to approximately $144/month.</li>
+</ul>
+<h2>Failure Modes &amp; Debugging</h2>
+<h3>Symptoms</h3>
+<ol>
+<li><strong>Message Duplication</strong>: If consumers are processing the same transaction multiple times, check if the idempotent logic is correctly implemented.</li>
+<li><strong>Out-of-Order Processing</strong>: If transactions are processed out of order, verify the partitioning strategy and ensure that all transactions for an account are routed to the same partition.</li>
+<li><strong>Database Connection Issues</strong>: If transactions are not being marked as processed, inspect the database connection and logs for timeouts or connection errors.</li>
+</ol>
+<h3>Diagnoses</h3>
+<ul>
+<li>Use logs to track transaction processing and any exceptions. Set up alerting for failures or high latency in processing.</li>
+<li>Monitor Kafka offsets to ensure consumers are reading messages as expected. </li>
+</ul>
+<h2>Observability</h2>
+<h3>Metrics</h3>
+<ul>
+<li><strong>Transaction Rate</strong>: Monitor the number of transactions processed per second.</li>
+<li><strong>Error Rate</strong>: Track the percentage of failed transactions.</li>
+<li><strong>Latency</strong>: Measure the time taken to process each transaction.</li>
+</ul>
+<h3>Logs</h3>
+<ul>
+<li>Log transaction details upon processing and errors encountered.</li>
+<li>Use structured logging to make it easier to filter logs by transaction ID.</li>
+</ul>
+<h3>Traces</h3>
+<ul>
+<li>Implement distributed tracing (e.g., using OpenTelemetry) to trace the flow of transactions through the system. This helps identify bottlenecks and performance issues.</li>
+</ul>
+<h3>Alerts</h3>
+<ul>
+<li>Alert on high error rates or latencies exceeding a predefined threshold (e.g., &gt;100ms) in transaction processing.</li>
+<li>Set up alerts for unprocessed messages in Kafka, indicating potential consumer failures.</li>
+</ul>
+<h2>Trade-offs</h2>
+<p>While the approach discussed provides a robust framework for reliable event processing, it comes with trade-offs:</p>
+<ol>
+<li><strong>Complexity</strong>: Implementing exactly-once semantics and idempotency increases system complexity, making debugging and maintenance more challenging.</li>
+<li><strong>Performance Overhead</strong>: Maintaining state in a database for</li>
+</ol>
+    </article>
+  </main>
+</body>
+</html>
