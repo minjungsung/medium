@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Concurrency in Python Beyond the Basics: Asyncio Pitfalls, Structured Concurrency, and Cancellation Safety</title>
+  <style>
+    /* Minimal styles for copy/paste/import */
+    body { margin: 0; font: 16px/1.7 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #111; }
+    main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+    article > h1 { margin: 0 0 16px; line-height: 1.2; }
+    pre { overflow: auto; padding: 12px; background: #f6f8fa; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.95em; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: 6px 8px; }
+    a { word-break: break-word; }
+  </style>
+</head>
+<body>
+  <main>
+    <article>
+      <h1>Concurrency in Python Beyond the Basics: Asyncio Pitfalls, Structured Concurrency, and Cancellation Safety</h1>
+      <p><em>Mastering concurrency in Python requires navigating its nuances, especially in complex applications.</em></p>
+<h2>Introduction</h2>
+<p>In Python, leveraging <code>asyncio</code> for concurrency can significantly improve performance and responsiveness, especially for I/O-bound applications. However, developers often encounter a myriad of pitfalls that can undermine the advantages of asynchronous programming. This article examines a real-world scenario: building an asynchronous web scraper that retrieves data from multiple APIs concurrently. We will explore the constraints of our system, the design and implementation choices made, and how to ensure cancellation safety and structured concurrency in our solution.</p>
+<h2>Constraints</h2>
+<ol>
+<li><strong>I/O Bound Tasks</strong>: Our web scraper will be fetching data from multiple APIs, making it critical to optimize for I/O-bound operations.</li>
+<li><strong>Error Handling</strong>: APIs may become unavailable or return errors, so robust error handling is essential.</li>
+<li><strong>Cancellation Safety</strong>: Users must be able to cancel ongoing scraping operations gracefully without leaving resources hanging.</li>
+<li><strong>Structured Concurrency</strong>: We want to ensure that tasks are properly managed and their lifecycles are tied to the function that spawns them.</li>
+</ol>
+<h2>Design</h2>
+<p>Given the constraints, we will use <code>asyncio</code> for concurrency. The design will focus on:</p>
+<ul>
+<li><strong>Task Management</strong>: Using <code>asyncio.gather</code> for structured concurrency to manage multiple API calls while ensuring that we can handle cancellations.</li>
+<li><strong>Cancellation Mechanism</strong>: Implementing a context manager to gracefully handle task cancellation.</li>
+<li><strong>Error Handling</strong>: Incorporating retry logic with exponential backoff for failed API calls.</li>
+</ul>
+<h2>Implementation</h2>
+<h3>Defining the Async Web Scraper</h3>
+<p>We will define a simple web scraper that fetches data from multiple APIs concurrently. Here’s a structured way to implement it:</p>
+<pre><code class="language-python">import asyncio
+import aiohttp
+import time
+
+class APIFetcher:
+    def __init__(self, urls):
+        self.urls = urls
+
+    async def fetch(self, session, url):
+        async with session.get(url) as response:
+            if response.status != 200:
+                raise Exception(f&quot;Failed to fetch {url}: Status {response.status}&quot;)
+            return await response.json()
+
+    async def fetch_all(self):
+        async with aiohttp.ClientSession() as session:
+            tasks = [self.fetch(session, url) for url in self.urls]
+            return await asyncio.gather(*tasks)
+
+    async def run(self):
+        try:
+            return await self.fetch_all()
+        except Exception as e:
+            print(f&quot;Error: {e}&quot;)
+            return None
+</code></pre>
+<h3>Adding Cancellation Support</h3>
+<p>To ensure cancellation safety, we will implement a context manager that can cancel tasks when needed:</p>
+<pre><code class="language-python">class CancellationContext:
+    def __init__(self):
+        self.cancel_event = asyncio.Event()
+
+    async def __aenter__(self):
+        return self.cancel_event
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        self.cancel_event.set()
+
+async def main(urls):
+    fetcher = APIFetcher(urls)
+    async with CancellationContext() as cancel_event:
+        try:
+            result = await fetcher.run()
+            return result
+        except asyncio.CancelledError:
+            print(&quot;Operation cancelled&quot;)
+            return None
+</code></pre>
+<h3>Putting It All Together</h3>
+<p>Now, we can implement the main function that calls the web scraper:</p>
+<pre><code class="language-python">async def execute_scraper(urls):
+    result = await main(urls)
+    if result is not None:
+        print(&quot;Fetch successful:&quot;, result)
+    else:
+        print(&quot;Fetch failed or cancelled.&quot;)
+
+urls = [
+    &quot;https://api.example.com/data1&quot;,
+    &quot;https://api.example.com/data2&quot;,
+    &quot;https://api.example.com/data3&quot;
+]
+
+if __name__ == &quot;__main__&quot;:
+    asyncio.run(execute_scraper(urls))
+</code></pre>
+<h2>Validation</h2>
+<p>To validate our implementation, we can run the scraper and observe its behavior during cancellation and error conditions. </p>
+<h3>Testing Cancellation</h3>
+<p>You can create an external mechanism (like a user signal) to trigger cancellation:</p>
+<pre><code class="language-python">import signal
+
+def handle_sigint(sig, frame):
+    print(&quot;Signal received, cancelling...&quot;)
+    asyncio.get_event_loop().stop()
+
+signal.signal(signal.SIGINT, handle_sigint)
+asyncio.run(execute_scraper(urls))
+</code></pre>
+<h2>Failure Modes &amp; Debugging</h2>
+<p>Even with a robust design, you may encounter several issues:</p>
+<ol>
+<li><strong>HTTP Errors</strong>: If an API returns a non-200 status code, our fetch function raises an exception. </li>
+<li><em>Symptom</em>: The application crashes or prints an error.</li>
+<li>
+<p><em>Diagnosis</em>: Check the response status code and modify error handling to retry failed requests.</p>
+</li>
+<li>
+<p><strong>Cancellation Issues</strong>: If <code>asyncio.CancelledError</code> is not handled properly, it may leave tasks hanging.</p>
+</li>
+<li><em>Symptom</em>: Resources not released, leading to memory leaks.</li>
+<li>
+<p><em>Diagnosis</em>: Ensure that every asynchronous task is wrapped in a try-except block for cancellation handling.</p>
+</li>
+<li>
+<p><strong>Event Loop Issues</strong>: If your application is not running in an appropriate event loop, it may fail silently.</p>
+</li>
+<li><em>Symptom</em>: Tasks not executing as expected.</li>
+<li><em>Diagnosis</em>: Ensure <code>asyncio.run()</code> is used correctly, and the event loop is managed properly.</li>
+</ol>
+<h2>Trade-offs</h2>
+<p>While our approach using <code>asyncio</code> and structured concurrency provides significant advantages in managing I/O-bound operations, there are scenarios where it may not be suitable:</p>
+<ol>
+<li>
+<p><strong>CPU-Bound Tasks</strong>: For CPU-bound tasks, consider using <code>concurrent.futures.ProcessPoolExecutor</code> instead, as <code>asyncio</code> does not provide benefits in this context.</p>
+</li>
+<li>
+<p><strong>Increased Complexity</strong>: The structured concurrency model adds complexity. If your application is simple and doesn’t require concurrent execution, the added overhead may not be justified.</p>
+</li>
+<li>
+<p><strong>Limited Libraries</strong>: Not all libraries support asynchronous operations. If your project relies heavily on synchronous libraries, mixing both paradigms can lead to difficulties in maintaining code clarity.</p>
+</li>
+</ol>
+<h2>Performance &amp; Cost</h2>
+<p>When implementing our web scraper, consider the following metrics:</p>
+<ul>
+<li>
+<p><strong>Latency</strong>: With <code>asyncio</code>, we can reduce the average latency of fetching data from multiple APIs. For example, fetching three APIs serially might take 300ms each (900ms total). Using <code>asyncio</code>, we can potentially reduce that to 100ms if the APIs respond quickly.</p>
+</li>
+<li>
+<p><strong>Throughput</strong>: By using <code>asyncio.gather</code>, we can handle multiple requests concurrently. With three concurrent requests, our throughput increases significantly compared to a serial approach.</p>
+</li>
+<li>
+<p><strong>Cloud Costs</strong>: If deploying in a cloud environment, consider the pricing model for API calls. Some cloud providers charge based on the number of requests, so optimizing the number of calls using batching or caching could lead to</p>
+</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>
