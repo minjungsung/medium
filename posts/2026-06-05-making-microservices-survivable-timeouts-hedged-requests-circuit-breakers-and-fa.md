@@ -1,0 +1,143 @@
+# Making Microservices Survivable: Timeouts, Hedged Requests, Circuit Breakers, and Fallbacks
+*How to design resilient microservices systems that withstand failures without compromising user experience.*
+
+## Thesis
+Microservices architectures inherently introduce complexities when it comes to service reliability. By employing a combination of timeouts, hedged requests, circuit breakers, and fallbacks, we can create a robust system that gracefully handles failures. In this article, we will explore a real-world scenario of a payment processing microservice, detailing the design and implementation of these resilience patterns while addressing their trade-offs and performance implications.
+
+## Constraints and Design
+Our system is a payment processing service that interacts with multiple external payment gateways. The primary constraints are:
+
+1. **Latency**: Payments need to be processed in less than 2 seconds for a good user experience.
+2. **High availability**: The payment service needs to be operational 99.9% of the time.
+3. **Consistency**: Payment data must be accurate and reflect the current state without duplications.
+4. **Scalability**: The system should handle a peak load of 10,000 transactions per minute.
+
+Given these constraints, we design a system that incorporates:
+
+- **Timeouts**: To avoid waiting indefinitely for a response from external gateways.
+- **Hedged Requests**: To send simultaneous requests to multiple gateways, reducing the risk of a single point of failure.
+- **Circuit Breakers**: To prevent cascading failures by stopping requests to an unhealthy service.
+- **Fallbacks**: To provide alternative paths in case of failures.
+
+## Implementation
+### Timeouts
+We implement timeouts for our HTTP requests to external payment gateways. Using Python's `httpx` library, we create a function to handle the requests with a timeout.
+
+```python
+import httpx
+
+async def process_payment(amount, payment_gateway_url):
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(payment_gateway_url, json={"amount": amount}, timeout=2.0)
+            response.raise_for_status()  # Raises an error for 4xx/5xx responses
+            return response.json()
+    except httpx.TimeoutException:
+        print(f"Timeout occurred for {payment_gateway_url}")
+        raise
+    except httpx.HTTPStatusError as e:
+        print(f"HTTP error occurred: {e.response.status_code}")
+        raise
+```
+
+### Hedged Requests
+To mitigate the risk of a single gateway failing, we implement hedged requests by querying multiple gateways in parallel. 
+
+```python
+import asyncio
+
+async def hedged_payment(amount, gateways):
+    tasks = [process_payment(amount, gateway) for gateway in gateways]
+    completed, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+
+    for task in completed:
+        if task.exception() is None:
+            return task.result()
+    
+    for task in pending:
+        task.cancel()  # Cancel remaining tasks
+    raise Exception("All gateways failed")
+```
+
+### Circuit Breakers
+We use a circuit breaker pattern to monitor the success rate of requests to each gateway. If a gateway fails more than a defined threshold, we stop sending requests to it temporarily.
+
+```python
+class CircuitBreaker:
+    def __init__(self, failure_threshold=5, recovery_timeout=60):
+        self.failure_threshold = failure_threshold
+        self.failure_count = 0
+        self.state = "CLOSED"
+        self.recovery_timeout = recovery_timeout
+        self.last_failure_time = None
+
+    def call(self, func, *args, **kwargs):
+        if self.state == "OPEN":
+            if (time.time() - self.last_failure_time) > self.recovery_timeout:
+                self.state = "HALF_OPEN"
+            else:
+                raise Exception("Circuit is open")
+
+        try:
+            result = func(*args, **kwargs)
+            self.reset()
+            return result
+        except Exception as e:
+            self.record_failure()
+            raise e
+
+    def record_failure(self):
+        self.failure_count += 1
+        if self.failure_count >= self.failure_threshold:
+            self.state = "OPEN"
+            self.last_failure_time = time.time()
+
+    def reset(self):
+        self.failure_count = 0
+        self.state = "CLOSED"
+```
+
+### Fallbacks
+In case all gateways fail, we need to implement a fallback mechanism. This could be logging the failure and notifying the user.
+
+```python
+async def fallback_payment(amount):
+    print(f"Processing payment of {amount} through fallback mechanism.")
+    # Here you can implement a logic to notify the user or log the failure
+```
+
+## Validation
+Testing the resilience of our payment processing system involves simulating various failure scenarios. We can use tools like `pytest` alongside `unittest.mock` to simulate timeouts and failed requests.
+
+```python
+from unittest.mock import patch
+
+def test_process_payment_timeout():
+    with patch('httpx.AsyncClient.post') as mock_post:
+        mock_post.side_effect = httpx.TimeoutException
+        with pytest.raises(httpx.TimeoutException):
+            await process_payment(100, "http://fake-gateway.com")
+```
+
+## Failure Modes & Debugging
+### Symptoms
+- **Symptoms of timeouts**: Users experience longer wait times, and payment failures are logged.
+- **Circuit breaker trips**: If a gateway is down for a prolonged period, the circuit breaker opens, and subsequent requests are blocked.
+- **Unexpected fallbacks**: If all gateways fail, fallback mechanisms trigger, leading to potential lost revenue opportunities.
+
+### Diagnosis
+- **Timeouts**: Check the logs for `TimeoutException` entries. Verify if the gateway is reachable and assess network latency.
+- **Circuit Breaker**: Monitor the failure count and state transitions. A sudden spike indicates an issue with the gateway. 
+- **Fallbacks**: Review fallback logs to identify frequency and context. High fallback occurrences may suggest issues in the primary path.
+
+## Trade-offs
+While implementing these resilience patterns increases reliability, there are situations where they may not be suitable:
+
+1. **Low-latency requirements**: If your application demands immediate responses (sub-millisecond), the overhead of circuit breakers or hedged requests might introduce unacceptable delays.
+2. **Cost implications**: Hedged requests increase the number of outgoing requests, potentially raising costs on cloud services or external APIs.
+3. **Complexity**: Introducing these patterns adds complexity to the codebase, which can make maintenance harder. Consider using libraries or frameworks that can abstract some of this complexity.
+
+## Performance & Cost
+To quantify performance, consider the following metrics:
+
+- **Latency**: With timeouts set to 2 seconds, and assuming a 100ms average response time from gateways, hedged requests might increase total latency to 200ms (2 gateways) under ideal conditions.
