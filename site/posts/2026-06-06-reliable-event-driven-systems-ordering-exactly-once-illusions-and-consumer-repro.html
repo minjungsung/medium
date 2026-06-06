@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Reliable Event-Driven Systems: Ordering, Exactly-Once Illusions, and Consumer Reprocessing</title>
+  <style>
+    /* Minimal styles for copy/paste/import */
+    body { margin: 0; font: 16px/1.7 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #111; }
+    main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+    article > h1 { margin: 0 0 16px; line-height: 1.2; }
+    pre { overflow: auto; padding: 12px; background: #f6f8fa; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.95em; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: 6px 8px; }
+    a { word-break: break-word; }
+  </style>
+</head>
+<body>
+  <main>
+    <article>
+      <h1>Reliable Event-Driven Systems: Ordering, Exactly-Once Illusions, and Consumer Reprocessing</h1>
+      <p><em>Exploring the intricacies of building a robust event-driven architecture for a financial transaction system.</em></p>
+<p>In the world of event-driven systems, ensuring message ordering, achieving exactly-once delivery semantics, and enabling efficient consumer reprocessing are critical to maintaining data consistency, especially in high-stakes environments like financial transaction processing. This article dives deep into the design and implementation of a reliable event-driven architecture, focusing on a payment processing system, while outlining the reasoning behind the design choices, potential pitfalls, and actionable insights.</p>
+<h2>Constraints and Requirements</h2>
+<p>When designing a reliable event-driven system for processing financial transactions, we must consider:</p>
+<ol>
+<li><strong>Ordering</strong>: Transactions must be processed in the order they are received to maintain consistency in account balances.</li>
+<li><strong>Exactly-once Processing</strong>: We must ensure that each transaction is processed exactly once to avoid double deductions or missed transactions.</li>
+<li><strong>Consumer Reprocessing</strong>: The system should handle failures gracefully, allowing consumers to reprocess events without introducing inconsistencies.</li>
+<li><strong>Performance</strong>: The system must handle high throughput with low latency, especially during peak transaction times.</li>
+</ol>
+<h3>Design Overview</h3>
+<p>To satisfy these constraints, we design a system using Apache Kafka as the event broker, which provides strong ordering guarantees and at-least-once delivery semantics. We will implement a microservice architecture where the payment processor service consumes events from a Kafka topic, processes them, and updates the database accordingly.</p>
+<p>Key components of the system include:</p>
+<ul>
+<li><strong>Kafka</strong>: For event streaming and ordering.</li>
+<li><strong>Database</strong>: A relational database that supports transactions (e.g., PostgreSQL).</li>
+<li><strong>Idempotency Key</strong>: A mechanism to ensure exactly-once processing.</li>
+<li><strong>Dead Letter Queue (DLQ)</strong>: For failed transactions that need to be reprocessed.</li>
+</ul>
+<h2>Implementation</h2>
+<h3>Setting Up Kafka</h3>
+<p>First, we need to set up a Kafka topic that guarantees message order. Each transaction will be published to this topic:</p>
+<pre><code class="language-bash"># Create a Kafka topic named &quot;transactions&quot;
+kafka-topics.sh --create --topic transactions --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1
+</code></pre>
+<p>Using a single partition ensures that messages are processed in order. However, this comes with limitations on throughput, which we will address later.</p>
+<h3>Consuming Transactions</h3>
+<p>Next, we implement a consumer service that reads from the Kafka topic and processes each transaction. Here’s a Python example using the <code>confluent-kafka</code> library:</p>
+<pre><code class="language-python">from confluent_kafka import Consumer, KafkaError
+import psycopg2
+import uuid
+
+def process_transaction(transaction):
+    transaction_id = transaction['id']
+    amount = transaction['amount']
+    account_id = transaction['account_id']
+
+    # Check if the transaction has already been processed
+    if has_transaction_been_processed(transaction_id):
+        return
+
+    # Update the account balance in a transaction
+    with conn.cursor() as cursor:
+        cursor.execute(&quot;UPDATE accounts SET balance = balance + %s WHERE id = %s&quot;, (amount, account_id))
+        cursor.execute(&quot;INSERT INTO transactions (id, account_id, amount) VALUES (%s, %s, %s)&quot;,
+                       (transaction_id, account_id, amount))
+    conn.commit()
+
+def consume_transactions():
+    consumer = Consumer({
+        'bootstrap.servers': 'localhost:9092',
+        'group.id': 'payment-processor',
+        'auto.offset.reset': 'earliest'
+    })
+    consumer.subscribe(['transactions'])
+
+    while True:
+        msg = consumer.poll(1.0)
+        if msg is None:
+            continue
+        if msg.error():
+            if msg.error().code() == KafkaError._PARTITION_EOF:
+                continue
+            else:
+                print(f&quot;Error: {msg.error()}&quot;)
+                continue
+
+        process_transaction(msg.value())
+
+# Database connection
+conn = psycopg2.connect(&quot;dbname=test user=postgres password=secret&quot;)
+
+consume_transactions()
+</code></pre>
+<h3>Exactly-Once Processing</h3>
+<p>To achieve exactly-once processing, we use an idempotency key. Each transaction is tagged with a unique identifier, allowing us to check if it has already been processed before executing the database operations. </p>
+<p>The <code>has_transaction_been_processed</code> function queries a dedicated table that tracks processed transaction IDs:</p>
+<pre><code class="language-python">def has_transaction_been_processed(transaction_id):
+    with conn.cursor() as cursor:
+        cursor.execute(&quot;SELECT COUNT(*) FROM transactions WHERE id = %s&quot;, (transaction_id,))
+        return cursor.fetchone()[0] &gt; 0
+</code></pre>
+<h3>Consumer Reprocessing and Dead Letter Queue</h3>
+<p>For transactions that fail due to transient errors (e.g., database connection issues), we can implement a retry mechanism with a Dead Letter Queue for persistent failures. Here’s how you can implement a simple retry logic:</p>
+<pre><code class="language-python">MAX_RETRIES = 3
+
+def consume_transactions():
+    consumer = Consumer({
+        'bootstrap.servers': 'localhost:9092',
+        'group.id': 'payment-processor',
+        'auto.offset.reset': 'earliest'
+    })
+    consumer.subscribe(['transactions'])
+
+    while True:
+        msg = consumer.poll(1.0)
+        if msg is None:
+            continue
+        if msg.error():
+            if msg.error().code() == KafkaError._PARTITION_EOF:
+                continue
+            else:
+                print(f&quot;Error: {msg.error()}&quot;)
+                continue
+
+        retries = 0
+        while retries &lt; MAX_RETRIES:
+            try:
+                process_transaction(msg.value())
+                break  # Break if processed successfully
+            except Exception as e:
+                retries += 1
+                if retries == MAX_RETRIES:
+                    send_to_dlq(msg.value())  # Send to DLQ after max retries
+                else:
+                    print(f&quot;Retrying transaction {msg.value()['id']} due to error: {e}&quot;)
+</code></pre>
+<h2>Trade-offs</h2>
+<p>While this approach provides strong guarantees around ordering and exactly-once processing, it is essential to consider the trade-offs:</p>
+<ol>
+<li>
+<p><strong>Scalability</strong>: By using a single partition for Kafka, we ensure ordering but limit throughput. If the system needs to scale, consider partitioning based on account ID or transaction type while managing the ordering at the application level.</p>
+</li>
+<li>
+<p><strong>Complexity</strong>: Implementing idempotency and managing a DLQ adds complexity to the system. Ensure that your team is equipped to handle these intricacies and that the architecture is well-documented.</p>
+</li>
+<li>
+<p><strong>Latency</strong>: The overhead of checking for processed transactions and handling retries can introduce latency. Monitor and optimize queries to ensure performance remains acceptable under load.</p>
+</li>
+</ol>
+<h2>Performance &amp; Cost</h2>
+<p>In terms of performance, using a single partition in Kafka can handle approximately 100 messages per second with a moderate payload size. If we assume each transaction updates a balance and inserts a record</p>
+    </article>
+  </main>
+</body>
+</html>
