@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Making Microservices Survivable: A Comprehensive Approach to Timeouts, Hedged Requests, Circuit Breakers, and Fallbacks</title>
+  <style>
+    /* Minimal styles for copy/paste/import */
+    body { margin: 0; font: 16px/1.7 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #111; }
+    main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+    article > h1 { margin: 0 0 16px; line-height: 1.2; }
+    pre { overflow: auto; padding: 12px; background: #f6f8fa; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.95em; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: 6px 8px; }
+    a { word-break: break-word; }
+  </style>
+</head>
+<body>
+  <main>
+    <article>
+      <h1>Making Microservices Survivable: A Comprehensive Approach to Timeouts, Hedged Requests, Circuit Breakers, and Fallbacks</h1>
+      <p><em>Designing resilient microservices requires a nuanced understanding of failure modes and thoughtful implementation of recovery strategies.</em></p>
+<h2>Introduction</h2>
+<p>Microservices architectures can provide significant flexibility and scalability, but they also introduce complexities that can lead to cascading failures if not carefully managed. This article will focus on a specific scenario: a microservice that fetches user profile data from a remote service, which is subject to varying latency and occasional outages. We will explore how to implement timeouts, hedged requests, circuit breakers, and fallbacks effectively to ensure survivability.</p>
+<h2>Constraints and Requirements</h2>
+<p>Assumptions made for this scenario include:</p>
+<ul>
+<li>We are working within a microservices architecture where service dependencies are network-based.</li>
+<li>The user profile service is a third-party API that can exhibit unpredictable behavior.</li>
+<li>Our service is expected to handle a minimum of 1000 requests per second with a maximum acceptable response time of 200 ms.</li>
+<li>We want to ensure that our system remains available and responsive even if the user profile service fails.</li>
+</ul>
+<p>Given these constraints, we need to design our service with the following goals:</p>
+<ol>
+<li>Minimize latency and ensure responsiveness.</li>
+<li>Avoid cascading failures across services.</li>
+<li>Provide a graceful degradation of service when failures occur.</li>
+</ol>
+<h2>Design Choices</h2>
+<h3>Timeouts</h3>
+<p>Timeouts will be crucial in ensuring that our service does not hang indefinitely when waiting for a response from the user profile service. We will set a timeout value of 100 ms for requests to the user profile service. This allows us to respond quickly to the user while also allowing time for retries or fallbacks.</p>
+<h3>Hedged Requests</h3>
+<p>To increase our chances of success when calling the user profile service, we will implement hedged requests. This involves sending duplicate requests to multiple instances of the user profile service and returning the result of the first successful response. This is useful for handling situations where one instance may be slow to respond.</p>
+<h3>Circuit Breakers</h3>
+<p>To prevent our service from overwhelming the user profile service during an outage, we will implement a circuit breaker. This will monitor the success rate of requests and temporarily block calls to the user profile service if the failure rate exceeds a predefined threshold (e.g., 50% over five seconds).</p>
+<h3>Fallbacks</h3>
+<p>In cases where both the primary and hedged requests fail, we will implement a fallback mechanism that provides cached data or a default response to maintain service availability.</p>
+<h2>Implementation</h2>
+<p>The following Python code implements the outlined strategies using the <code>httpx</code> library for making HTTP requests and <code>asyncio</code> for concurrency.</p>
+<pre><code class="language-python">import httpx
+import asyncio
+import time
+from circuitbreaker import CircuitBreaker, CircuitBreakerError
+
+class UserProfileService:
+    def __init__(self):
+        self.circuit_breaker = CircuitBreaker(failure_threshold=0.5, recovery_timeout=5)
+
+    async def fetch_user_profile(self, user_id):
+        async with httpx.AsyncClient() as client:
+            return await self.circuit_breaker.call(self._get_user_profile, user_id)
+
+    async def _get_user_profile(self, user_id):
+        timeout = 0.1  # 100 ms timeout
+        response = await asyncio.gather(
+            self._request_user_profile(user_id, timeout),
+            self._request_user_profile(user_id, timeout)
+        )
+        # Return the first successful response
+        for res in response:
+            if res:
+                return res
+        raise Exception(&quot;All requests failed&quot;)
+
+    async def _request_user_profile(self, user_id, timeout):
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f&quot;https://api.example.com/users/{user_id}&quot;, timeout=timeout)
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            print(f&quot;Error fetching data: {e}&quot;)
+            return None
+
+    async def fallback(self, user_id):
+        return {&quot;name&quot;: &quot;Unknown&quot;, &quot;age&quot;: 0}  # Default fallback response
+
+# Usage
+service = UserProfileService()
+user_profile = asyncio.run(service.fetch_user_profile(&quot;12345&quot;))
+</code></pre>
+<h3>Explanation of Code</h3>
+<ol>
+<li><strong>Circuit Breaker</strong>: A custom <code>CircuitBreaker</code> class manages the state of the service calls. It blocks requests to the user profile service if the failure rate exceeds 50% over the last 5 seconds.</li>
+<li><strong>Hedged Requests</strong>: The <code>_get_user_profile</code> method sends two requests to the user profile service concurrently and returns the first successful response.</li>
+<li><strong>Fallback</strong>: The <code>fallback</code> method provides a default response when all requests fail, ensuring that the user still receives a response.</li>
+</ol>
+<h2>Validation and Testing</h2>
+<p>To validate our implementation, we should conduct load testing with tools like Locust or JMeter, simulating various failure scenarios, such as:</p>
+<ol>
+<li><strong>Normal Operation</strong>: Verify response times and throughput when the user profile service is healthy.</li>
+<li><strong>Service Latency</strong>: Introduce artificial latency (e.g., 300 ms) to simulate a slow service and monitor how the circuit breaker and hedged requests perform.</li>
+<li><strong>Service Outage</strong>: Simulate a complete failure of the user profile service and check if fallback responses are returned promptly.</li>
+</ol>
+<h3>Failure Modes &amp; Debugging</h3>
+<h4>Symptoms</h4>
+<ul>
+<li><strong>Increased Latency</strong>: If the response time exceeds 200 ms, it may indicate that the timeouts or hedged requests are not functioning effectively.</li>
+<li><strong>Circuit Breaker Tripping</strong>: If the circuit breaker trips frequently, it suggests that the failure rate is consistently high, possibly indicating issues with the user profile service.</li>
+</ul>
+<h4>Diagnoses</h4>
+<ul>
+<li><strong>Excessive Timeouts</strong>: If requests are timing out frequently, consider analyzing the response times of the user profile service and adjusting the timeout values accordingly.</li>
+<li><strong>High Error Rate</strong>: Monitor error logs for specific HTTP status codes. Frequent 5xx errors may indicate problems with the user profile service itself.</li>
+</ul>
+<h2>Trade-offs</h2>
+<p>While the implementation of timeouts, hedged requests, circuit breakers, and fallbacks can greatly enhance survivability, there are trade-offs to consider:</p>
+<ul>
+<li><strong>Increased Complexity</strong>: The more components you add (e.g., circuit breakers, hedged requests), the more complex the system becomes, which can introduce bugs and increase the maintenance burden.</li>
+<li><strong>Resource Utilization</strong>: Hedged requests double the outgoing calls to the user profile service, potentially increasing cloud costs and resource consumption when the service is under load.</li>
+<li><strong>Latency</strong>: Each additional request adds latency to the overall response time, especially if the circuit breaker triggers.</li>
+</ul>
+<h3>When NOT to Use This Approach</h3>
+<ul>
+<li><strong>Simple Services</strong>: If the microservice requires only a single, reliable call with minimal dependencies, the complexity introduced by hedged requests and circuit breakers may not be</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>
