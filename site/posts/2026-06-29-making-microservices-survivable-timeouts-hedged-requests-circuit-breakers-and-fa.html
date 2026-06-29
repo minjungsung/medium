@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Making Microservices Survivable: Timeouts, Hedged Requests, Circuit Breakers, and Fallbacks</title>
+  <style>
+    /* Minimal styles for copy/paste/import */
+    body { margin: 0; font: 16px/1.7 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #111; }
+    main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+    article > h1 { margin: 0 0 16px; line-height: 1.2; }
+    pre { overflow: auto; padding: 12px; background: #f6f8fa; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.95em; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: 6px 8px; }
+    a { word-break: break-word; }
+  </style>
+</head>
+<body>
+  <main>
+    <article>
+      <h1>Making Microservices Survivable: Timeouts, Hedged Requests, Circuit Breakers, and Fallbacks</h1>
+      <p><em>Strategies for enhancing resilience in a microservices architecture.</em></p>
+<p>In a microservices architecture, particularly when interfacing with multiple external services, the risk of failure increases significantly. These failures can stem from network issues, service downtimes, or even unexpected load spikes. A robust design that incorporates timeouts, hedged requests, circuit breakers, and fallbacks is essential to create a survivable microservices ecosystem. This article will explore a scenario where a payment processing service interacts with various dependent services, detailing how to implement these strategies effectively.</p>
+<h2>Constraints and Design Considerations</h2>
+<h3>Assumptions</h3>
+<ol>
+<li>The payment processing service communicates with external services for user verification, fraud detection, and transaction processing.</li>
+<li>The service must handle high concurrency with low latency while maintaining a reliable user experience.</li>
+<li>The system must not degrade in performance under partial failures and should provide reasonable responses even when some services become unresponsive.</li>
+</ol>
+<h3>Constraints</h3>
+<ul>
+<li><strong>High Availability</strong>: The service is expected to handle thousands of requests per second.</li>
+<li><strong>Latency</strong>: Response times must not exceed 200 milliseconds under normal conditions.</li>
+<li><strong>Fault Tolerance</strong>: The system should gracefully degrade rather than fail outright if a dependent service is unresponsive.</li>
+</ul>
+<h3>Design Overview</h3>
+<p>To meet these constraints, we will implement:
+1. <strong>Timeouts</strong>: To avoid waiting indefinitely for responses from external services.
+2. <strong>Hedged Requests</strong>: To send multiple requests to different services to minimize the impact of slow responses.
+3. <strong>Circuit Breakers</strong>: To prevent unnecessary load on failing services and allow for quick recovery.
+4. <strong>Fallbacks</strong>: To provide alternative responses when certain services fail.</p>
+<h2>Implementation</h2>
+<h3>Timeouts</h3>
+<p>Implementing timeouts involves setting a maximum duration for waiting for responses from dependent services. This can be implemented using an HTTP client with timeout settings.</p>
+<pre><code class="language-python">import requests
+
+class PaymentService:
+    def __init__(self):
+        self.user_verification_url = &quot;https://api.example.com/verify_user&quot;
+        self.timeout = 2  # seconds
+
+    def verify_user(self, user_id):
+        try:
+            response = requests.get(f&quot;{self.user_verification_url}/{user_id}&quot;, timeout=self.timeout)
+            response.raise_for_status()
+            return response.json()
+        except requests.Timeout:
+            # Handle timeout, possibly log it
+            return {&quot;error&quot;: &quot;User verification timeout&quot;}
+        except requests.RequestException as e:
+            # Handle other request errors
+            return {&quot;error&quot;: str(e)}
+</code></pre>
+<h3>Hedged Requests</h3>
+<p>Hedged requests are particularly useful for mitigating the risk of slow responses. By sending requests to multiple services, we can respond with the fastest result.</p>
+<pre><code class="language-python">import concurrent.futures
+
+class PaymentService:
+    def __init__(self):
+        self.user_verification_urls = [
+            &quot;https://api1.example.com/verify_user&quot;,
+            &quot;https://api2.example.com/verify_user&quot;
+        ]
+        self.timeout = 2  # seconds
+
+    def hedged_verify_user(self, user_id):
+        def make_request(url):
+            try:
+                response = requests.get(f&quot;{url}/{user_id}&quot;, timeout=self.timeout)
+                response.raise_for_status()
+                return response.json()
+            except requests.RequestException:
+                return None
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = {executor.submit(make_request, url): url for url in self.user_verification_urls}
+            for future in concurrent.futures.as_completed(futures, timeout=self.timeout):
+                result = future.result()
+                if result:
+                    return result  # Return the first successful response
+
+        return {&quot;error&quot;: &quot;All user verification requests failed&quot;}
+</code></pre>
+<h3>Circuit Breakers</h3>
+<p>The circuit breaker pattern can be implemented to prevent the service from sending requests to a failing service after a predefined number of failures.</p>
+<pre><code class="language-python">import time
+
+class CircuitBreaker:
+    def __init__(self, failure_threshold=3, recovery_timeout=10):
+        self.failure_count = 0
+        self.failure_threshold = failure_threshold
+        self.state = &quot;CLOSED&quot;
+        self.recovery_timeout = recovery_timeout
+        self.last_failure_time = None
+
+    def call(self, func, *args, **kwargs):
+        if self.state == &quot;OPEN&quot;:
+            if time.time() - self.last_failure_time &gt; self.recovery_timeout:
+                self.state = &quot;HALF_OPEN&quot;
+            else:
+                return {&quot;error&quot;: &quot;Circuit is open&quot;}
+
+        try:
+            result = func(*args, **kwargs)
+            self.failure_count = 0  # Reset on success
+            if self.state == &quot;HALF_OPEN&quot;:
+                self.state = &quot;CLOSED&quot;  # Close the circuit after a successful call
+            return result
+        except Exception:
+            self.failure_count += 1
+            if self.failure_count &gt;= self.failure_threshold:
+                self.state = &quot;OPEN&quot;
+                self.last_failure_time = time.time()
+            return {&quot;error&quot;: &quot;Service failed&quot;}
+</code></pre>
+<h3>Fallbacks</h3>
+<p>Fallbacks provide an alternative response when a service fails. This can be a cached value, a default response, or a secondary service.</p>
+<pre><code class="language-python">class PaymentService:
+    def __init__(self):
+        self.circuit_breaker = CircuitBreaker()
+
+    def process_payment(self, user_id):
+        response = self.circuit_breaker.call(self.hedged_verify_user, user_id)
+        if &quot;error&quot; in response:
+            return self.fallback_response()
+        # Proceed with payment processing
+        return {&quot;status&quot;: &quot;Payment processed&quot;}
+
+    def fallback_response(self):
+        return {&quot;status&quot;: &quot;User verification is currently unavailable, please try again later.&quot;}
+</code></pre>
+<h2>Performance &amp; Cost</h2>
+<h3>Latency and Throughput</h3>
+<p>The implementation of timeouts and hedged requests can introduce additional latency. For example, if each request to a verification service takes an average of 150 milliseconds, hedging two requests may lead to a maximum latency of 300 milliseconds. However, this is a trade-off for improved reliability.</p>
+<ul>
+<li><strong>Without Hedging</strong>: 150 ms average latency.</li>
+<li><strong>With Hedging</strong>: 300 ms worst-case latency (considering concurrent requests).</li>
+<li><strong>Throughput</strong>: Assuming a single-threaded service can handle 1000 requests per second without hedging, with hedging, the effective throughput may drop to around 750 requests per second due to increased latency.</li>
+</ul>
+<h3>Cost</h3>
+<p>For cloud-based services, consider the cost implications of additional requests due to hedging. If each request costs $0.01 and you expect 1,000,000 requests per month, hedging could double costs to $0.02 per request, leading to $20,000 instead of $10,000.</p>
+<h2>Failure Modes &amp; Debugging</h2>
+<h3>Symptoms</h3>
+<ul>
+<li>**</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>
