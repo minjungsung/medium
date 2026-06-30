@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Reliable Event-Driven Systems: Ordering, Exactly-Once Illusions, and Consumer Reprocessing</title>
+  <style>
+    /* Minimal styles for copy/paste/import */
+    body { margin: 0; font: 16px/1.7 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #111; }
+    main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+    article > h1 { margin: 0 0 16px; line-height: 1.2; }
+    pre { overflow: auto; padding: 12px; background: #f6f8fa; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.95em; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: 6px 8px; }
+    a { word-break: break-word; }
+  </style>
+</head>
+<body>
+  <main>
+    <article>
+      <h1>Reliable Event-Driven Systems: Ordering, Exactly-Once Illusions, and Consumer Reprocessing</h1>
+      <p><em>Building resilient microservices using Apache Kafka and Debezium.</em></p>
+<p>In the landscape of event-driven architectures, achieving reliability while maintaining strict ordering and exactly-once processing semantics presents a formidable challenge. This article delves into a practical implementation of an event-driven system using Apache Kafka and Debezium, focusing on a financial transaction processing workload. We will explore the constraints of ordering, the illusion of exactly-once semantics, and the reprocessing of consumer events, laying out a clear reasoning chain from constraints to design, implementation, and validation.</p>
+<h2>Constraints</h2>
+<p>The requirements for our financial transaction processing system are as follows:</p>
+<ol>
+<li><strong>Ordering</strong>: Transactions must be processed in the order they are created. This is critical for maintaining the integrity of financial records.</li>
+<li><strong>Exactly-Once Processing</strong>: Each transaction should be processed exactly once, without duplicates or omissions.</li>
+<li><strong>Consumer Reprocessing</strong>: In the event of failures or errors, consumers must be able to reprocess events without losing the context of previously processed transactions.</li>
+</ol>
+<p>Given these requirements, we must design a system that can handle high throughput while ensuring the reliability of our transactions.</p>
+<h2>Design</h2>
+<p>We will use Apache Kafka as our event broker and Debezium to capture changes from a relational database. The overall architecture will consist of:</p>
+<ul>
+<li><strong>Producers</strong>: Services that publish transaction events to Kafka topics.</li>
+<li><strong>Kafka Topics</strong>: Partitioned topics to ensure ordering within a partition.</li>
+<li><strong>Debezium</strong>: A CDC (Change Data Capture) tool that captures changes from our database and sends them to a Kafka topic.</li>
+<li><strong>Consumers</strong>: Microservices that read from Kafka topics, process transactions, and update the database.</li>
+</ul>
+<h3>Key Design Decisions</h3>
+<ol>
+<li>
+<p><strong>Partitioning</strong>: To maintain order, we will partition our Kafka topic by a transaction key (e.g., user ID). This ensures that all transactions for a user are processed in order.</p>
+</li>
+<li>
+<p><strong>Transactional Producers</strong>: We will utilize Kafka's transactional producers to achieve exactly-once semantics. This involves configuring producers with <code>enable.idempotence</code> and using transactions when sending messages.</p>
+</li>
+<li>
+<p><strong>Debezium Configuration</strong>: Debezium will be configured to publish change events for our transaction table to Kafka, ensuring that we can capture both inserts and updates.</p>
+</li>
+<li>
+<p><strong>Consumer State Management</strong>: Consumers will maintain a local state to track the last successfully processed transaction, enabling them to reprocess messages in case of failures.</p>
+</li>
+</ol>
+<h2>Implementation</h2>
+<h3>Kafka Producer Configuration</h3>
+<p>Here's how to configure a Kafka producer for transactional messaging:</p>
+<pre><code class="language-python">from kafka import KafkaProducer
+
+producer = KafkaProducer(
+    bootstrap_servers='localhost:9092',
+    acks='all',
+    enable_idempotence=True,
+    transaction_timeout_ms=60000
+)
+
+producer.init_transactions()
+</code></pre>
+<h3>Sending Transactions</h3>
+<p>When sending a transaction, we wrap the send call in a transaction:</p>
+<pre><code class="language-python">def send_transaction(transaction_id, transaction_data):
+    producer.begin_transaction()
+    try:
+        producer.send('transactions', key=str(transaction_id).encode(), value=transaction_data)
+        producer.commit_transaction()
+    except Exception as e:
+        producer.abort_transaction()
+        raise e
+</code></pre>
+<h3>Debezium Connector Configuration</h3>
+<p>The following configuration sets up the Debezium connector for a PostgreSQL database:</p>
+<pre><code class="language-json">{
+  &quot;name&quot;: &quot;postgresql-connector&quot;,
+  &quot;config&quot;: {
+    &quot;connector.class&quot;: &quot;io.debezium.connector.postgresql.PostgresConnector&quot;,
+    &quot;tasks.max&quot;: &quot;1&quot;,
+    &quot;database.hostname&quot;: &quot;localhost&quot;,
+    &quot;database.port&quot;: &quot;5432&quot;,
+    &quot;database.user&quot;: &quot;debezium&quot;,
+    &quot;database.password&quot;: &quot;dbz&quot;,
+    &quot;database.dbname&quot;: &quot;transactions&quot;,
+    &quot;table.whitelist&quot;: &quot;public.transactions&quot;,
+    &quot;transforms&quot;: &quot;route&quot;,
+    &quot;transforms.route.type&quot;: &quot;org.apache.kafka.connect.transforms.RegexRouter&quot;,
+    &quot;transforms.route.regex&quot;: &quot;public\\.transactions&quot;,
+    &quot;transforms.route.replacement&quot;: &quot;transactions&quot;
+  }
+}
+</code></pre>
+<h3>Consumer Implementation</h3>
+<p>The consumer will read from the Kafka topic and process transactions:</p>
+<pre><code class="language-python">from kafka import KafkaConsumer
+
+consumer = KafkaConsumer(
+    'transactions',
+    bootstrap_servers='localhost:9092',
+    group_id='transaction-processor',
+    enable_auto_commit=False
+)
+
+last_processed_transaction = None
+
+for message in consumer:
+    transaction_id = message.key.decode()
+    transaction_data = message.value  
+    if last_processed_transaction is None or last_processed_transaction &lt; transaction_id:
+        process_transaction(transaction_data)
+        last_processed_transaction = transaction_id
+        consumer.commit()
+</code></pre>
+<h2>Validation</h2>
+<p>To ensure the system meets the reliability requirements, we will implement the following validation strategies:</p>
+<ol>
+<li>
+<p><strong>Unit Tests</strong>: Write comprehensive unit tests for the producer and consumer logic, ensuring that edge cases are handled correctly.</p>
+</li>
+<li>
+<p><strong>Integration Tests</strong>: Set up integration tests that simulate failure scenarios, such as network partitions or consumer crashes, to validate reprocessing functionality.</p>
+</li>
+<li>
+<p><strong>Monitoring</strong>: Implement observability metrics and alerts, as detailed in the next section.</p>
+</li>
+</ol>
+<h2>Performance &amp; Cost</h2>
+<p>In a typical scenario, let's analyze the performance metrics:</p>
+<ul>
+<li>
+<p><strong>Throughput</strong>: Kafka can handle thousands of messages per second per partition. Assuming a workload of 1000 transactions per second, and each transaction is approximately 1 KB:</p>
+<ul>
+<li>Total throughput would be around 1 MB/s.</li>
+</ul>
+</li>
+<li>
+<p><strong>Latency</strong>: With proper tuning, Kafka can achieve end-to-end latency of under 100 ms. Our consumer should be able to process each transaction in under 10 ms if it only performs simple updates.</p>
+</li>
+<li>
+<p><strong>Cloud Cost</strong>: If deployed in a cloud environment (e.g., AWS), consider the following costs:</p>
+<ul>
+<li>Kafka cluster: $0.10 per broker hour.</li>
+<li>Debezium connector: $0.02 per connector hour.</li>
+<li>Data transfer: $0.09 per GB.</li>
+</ul>
+</li>
+</ul>
+<p>For 1 TB of data per month (approx. 34 MB/day), the estimated cost would be around $100/month for the Kafka cluster and connectors, plus data transfer fees.</p>
+<h2>Trade-offs</h2>
+<p>While this design achieves the desired reliability and order guarantees, it also introduces certain trade-offs:</p>
+<ol>
+<li>
+<p><strong>Complexity</strong>: The use of Kafka transactions and Debezium adds complexity to the system. If simplicity is a priority, consider using an alternative messaging system that may not support these guarantees.</p>
+</li>
+<li>
+<p><strong>Performance Overhead</strong>: Using transactions incurs overhead. If your system can tolerate duplicates, consider using a simpler approach without transactions.</p>
+</li>
+<li>
+<p><strong>Eventual Consistency</strong>: While we strive for exactly-once semantics, network partitions or broker failures may still lead to transient inconsistencies. Be prepared to handle eventual consistency in your application logic.</p>
+</li>
+</ol>
+<h2>Observability</h2>
+<p>A robust observability</p>
+    </article>
+  </main>
+</body>
+</html>
