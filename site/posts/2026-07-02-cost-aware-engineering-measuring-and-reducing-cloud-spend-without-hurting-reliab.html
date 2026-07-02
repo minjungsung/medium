@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Cost-Aware Engineering: Measuring and Reducing Cloud Spend Without Hurting Reliability</title>
+  <style>
+    /* Minimal styles for copy/paste/import */
+    body { margin: 0; font: 16px/1.7 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #111; }
+    main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+    article > h1 { margin: 0 0 16px; line-height: 1.2; }
+    pre { overflow: auto; padding: 12px; background: #f6f8fa; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.95em; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: 6px 8px; }
+    a { word-break: break-word; }
+  </style>
+</head>
+<body>
+  <main>
+    <article>
+      <h1>Cost-Aware Engineering: Measuring and Reducing Cloud Spend Without Hurting Reliability</h1>
+      <p><em>Optimizing cloud costs while ensuring system reliability requires a strategic approach to resource management and observability.</em></p>
+<h2>Thesis Statement</h2>
+<p>Effective cloud cost management is not just about reducing expenses; it requires a careful balancing act to ensure system reliability. By implementing a cost-aware architecture in a serverless compute environment like AWS Lambda, we can measure and optimize cloud spend without compromising performance or availability.</p>
+<h2>Constraints</h2>
+<ol>
+<li><strong>Budget Limit:</strong> We aim to reduce cloud spending by at least 30% over the next quarter.</li>
+<li><strong>System Reliability:</strong> We need to maintain a 99.9% uptime SLA.</li>
+<li><strong>Workload Characteristics:</strong> The system processes variable workloads with unpredictable spikes in demand, necessitating a flexible and responsive architecture.</li>
+<li><strong>Cloud Provider:</strong> We are committed to using AWS services, primarily Lambda, DynamoDB, and S3.</li>
+</ol>
+<h2>Design</h2>
+<h3>Architecture Overview</h3>
+<p>The architecture consists of an AWS Lambda function triggering on S3 events. The function processes uploaded files and stores results in DynamoDB. This serverless setup allows for automatic scaling, which is ideal for fluctuating workloads. </p>
+<h3>Key Design Decisions</h3>
+<ol>
+<li><strong>Event-Driven Architecture:</strong> Using S3 events minimizes idle resources and only incurs costs when files are uploaded.</li>
+<li><strong>DynamoDB for Storage:</strong> The NoSQL database provides cost-effective performance for variable access patterns.</li>
+<li><strong>Monitoring and Alerts:</strong> Integrating AWS CloudWatch for detailed observability helps in managing costs effectively.</li>
+</ol>
+<h3>Cost Management Features</h3>
+<ol>
+<li><strong>Adaptive Scaling:</strong> Implementing concurrency limits on Lambda functions to control costs during peak usage.</li>
+<li><strong>Cost Awareness:</strong> Using tags to categorize Lambda functions and DynamoDB tables for cost tracking.</li>
+</ol>
+<h2>Implementation</h2>
+<h3>Lambda Function Example</h3>
+<p>Here’s a simplified implementation of the AWS Lambda function that processes S3 uploads:</p>
+<pre><code class="language-python">import json
+import boto3
+import logging
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+dynamodb = boto3.resource('dynamodb')
+table = dynamodb.Table('ProcessedFiles')
+
+def lambda_handler(event, context):
+    for record in event['Records']:
+        s3_bucket = record['s3']['bucket']['name']
+        s3_key = record['s3']['object']['key']
+
+        # Simulating file processing
+        logger.info(f&quot;Processing file: {s3_key} from bucket: {s3_bucket}&quot;)
+        file_content = fetch_file_from_s3(s3_bucket, s3_key)  # Assume this function is defined
+
+        result = process_file(file_content)  # Assume this function processes the content
+
+        # Store result in DynamoDB
+        table.put_item(
+            Item={
+                'file_key': s3_key,
+                'result': result
+            }
+        )
+
+    return {
+        'statusCode': 200,
+        'body': json.dumps('Processing complete')
+    }
+</code></pre>
+<h3>Cost Tracking with AWS Tags</h3>
+<p>To effectively track costs, we can use AWS tags. Here’s how to apply tags to our Lambda function:</p>
+<pre><code class="language-python">import boto3
+
+def tag_lambda_function(function_name):
+    client = boto3.client('lambda')
+    tags = {
+        'Environment': 'Production',
+        'CostCenter': 'FileProcessing'
+    }
+
+    client.tag_resource(
+        Resource=f'arn:aws:lambda:REGION:ACCOUNT_ID:function:{function_name}',
+        Tags=tags
+    )
+</code></pre>
+<h2>Validation</h2>
+<h3>Cost Measurement</h3>
+<p>To validate cost savings, we will measure the following metrics both pre- and post-implementation:</p>
+<ol>
+<li><strong>Lambda Execution Costs:</strong> Monitor the cost of executing Lambda functions via CloudWatch.</li>
+<li><strong>DynamoDB Costs:</strong> Analyze the read/write capacity and storage costs in DynamoDB.</li>
+</ol>
+<h3>Performance Testing</h3>
+<p>Load testing should be performed using tools like AWS Load Testing to simulate varying degrees of traffic and ensure the system can handle spikes without degradation.</p>
+<h2>Failure Modes &amp; Debugging</h2>
+<h3>Common Issues</h3>
+<ol>
+<li>
+<p><strong>Cold Start Latency:</strong> If Lambda functions are not invoked frequently, cold starts can lead to increased latencies. Monitor the metrics for invocation rates and latencies.</p>
+</li>
+<li>
+<p><strong>DynamoDB Throttling:</strong> When exceeding provisioned throughput, requests can be throttled. Symptoms include increased error rates and latency. Monitor CloudWatch metrics for <code>ThrottledRequests</code>.</p>
+</li>
+</ol>
+<h3>Diagnosis</h3>
+<p>To diagnose high latencies or failures, the following steps can be taken:
+- Check CloudWatch logs for Lambda functions to identify cold start times and invocation failures.
+- Review DynamoDB metrics for read and write capacity usage to ensure proper scaling.</p>
+<h2>Trade-offs</h2>
+<h3>When Not to Use This Approach</h3>
+<ol>
+<li><strong>Consistent Load Patterns:</strong> If your application has predictable workloads, a reserved instance or dedicated resources may be more cost-effective.</li>
+<li><strong>High Performance Requirements:</strong> If your application has stringent latency requirements that cannot tolerate cold starts or eventual consistency of DynamoDB, consider a more traditional architecture.</li>
+</ol>
+<h2>Performance &amp; Cost</h2>
+<h3>Cost Breakdown</h3>
+<p>For a typical workload processing 1,000 files per day with an average file size of 1MB, the estimated costs might look like this:</p>
+<ul>
+<li><strong>AWS Lambda Costs:</strong> Assume an average execution time of 200ms per function:</li>
+<li>1,000 invocations * 0.2 seconds = 200 seconds total execution time</li>
+<li>
+<p>200 seconds * (1,000,000 requests / 2,000,000) (GB seconds) * $0.00001667 (pricing) = $0.01667</p>
+</li>
+<li>
+<p><strong>DynamoDB Costs:</strong> Assuming 1 write per processed file:</p>
+</li>
+<li>1,000 writes/day</li>
+<li>Cost for 1 write capacity unit (WCU) = $0.0065</li>
+<li>Daily cost = 1,000 * $0.0065 = $6.5/day or $195/month</li>
+</ul>
+<p>Total estimated monthly cost: $195 + $0.01667 = <strong>$195.01667</strong>.</p>
+<h3>Budget Management</h3>
+<p>To stay within the budget, monitor daily costs and set alerts in CloudWatch for when costs exceed specified thresholds.</p>
+<h2>Observability</h2>
+<h3>Metrics, Logs, and Traces</h3>
+<ol>
+<li><strong>Key Metrics to Monitor:</strong></li>
+<li>Lambda Invocations</li>
+<li>Lambda Duration</li>
+<li>DynamoDB Throttled Requests</li>
+<li>
+<p>S3 Event Notifications</p>
+</li>
+<li>
+<p><strong>Logging Strategy:</strong> </p>
+</li>
+<li>Implement structured logging in the Lambda function to capture key events and errors.</li>
+<li>
+<p>Use AWS CloudWatch Logs Insights to query logs for troubleshooting.</p>
+</li>
+<li>
+<p><strong>Tracing:</strong> Use AWS X-Ray to trace requests through the Lambda and DynamoDB layers, identifying bottlenecks in performance.</p>
+</li>
+</ol>
+<h3>Alerts</h3>
+<p>Set alerts in CloudWatch for:
+- Increased error rates on Lambda functions
+- Throttled requests in DynamoDB
+- Cost spikes exceeding 10% of the</p>
+    </article>
+  </main>
+</body>
+</html>
