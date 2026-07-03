@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Designing Idempotent APIs Under At-Least-Once Delivery</title>
+  <style>
+    /* Minimal styles for copy/paste/import */
+    body { margin: 0; font: 16px/1.7 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #111; }
+    main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+    article > h1 { margin: 0 0 16px; line-height: 1.2; }
+    pre { overflow: auto; padding: 12px; background: #f6f8fa; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.95em; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: 6px 8px; }
+    a { word-break: break-word; }
+  </style>
+</head>
+<body>
+  <main>
+    <article>
+      <h1>Designing Idempotent APIs Under At-Least-Once Delivery</h1>
+      <p><em>Creating robust systems in the face of retries and failure semantics.</em></p>
+<p>In a world where distributed systems dominate, designing APIs that can withstand the rigors of at-least-once delivery semantics is paramount. This article will delve into the implementation of idempotent APIs tailored for a payment processing system, focusing on retries, deduplication keys, and failure semantics. By meticulously understanding and addressing the constraints imposed by at-least-once delivery, we can create resilient and efficient payment APIs.</p>
+<h2>Constraints and Challenges</h2>
+<p>When designing an idempotent API for payment processing, we face several constraints:</p>
+<ol>
+<li><strong>At-least-once delivery</strong>: Requests may be received multiple times due to network issues or retries.</li>
+<li><strong>Idempotency</strong>: Multiple identical requests must result in the same final state. For example, processing the same payment twice should not charge the customer twice.</li>
+<li><strong>Concurrency</strong>: Multiple requests may be processed concurrently, leading to race conditions if not handled correctly.</li>
+<li><strong>State management</strong>: We need to maintain the state of each request and ensure appropriate responses are sent back to the client.</li>
+</ol>
+<p>Given these constraints, our design must ensure that duplicate requests do not adversely affect the system's integrity.</p>
+<h2>Design Approach</h2>
+<h3>1. Request Structure</h3>
+<p>We can start by defining a request structure that includes a unique deduplication key. This key will allow us to identify whether a request has already been processed.</p>
+<pre><code class="language-python">class PaymentRequest:
+    def __init__(self, amount, currency, deduplication_key):
+        self.amount = amount
+        self.currency = currency
+        self.deduplication_key = deduplication_key
+</code></pre>
+<h3>2. Database Schema</h3>
+<p>Next, we will create a database schema that can track processed payments. This schema will include fields for the amount, currency, status, and the deduplication key.</p>
+<pre><code class="language-sql">CREATE TABLE payments (
+    id SERIAL PRIMARY KEY,
+    amount DECIMAL(10, 2) NOT NULL,
+    currency VARCHAR(3) NOT NULL,
+    status VARCHAR(20) NOT NULL,
+    deduplication_key VARCHAR(255) UNIQUE NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+</code></pre>
+<h3>3. API Endpoint</h3>
+<p>Now, we will design the API endpoint that processes payments. The endpoint will check if the payment has already been processed using the deduplication key.</p>
+<pre><code class="language-python">from flask import Flask, request, jsonify
+from sqlalchemy import create_engine, Column, String, Integer, Numeric, DateTime
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.exc import IntegrityError
+import datetime
+
+app = Flask(__name__)
+Base = declarative_base()
+engine = create_engine('postgresql://user:password@localhost/mydatabase')
+Session = sessionmaker(bind=engine)
+
+class Payment(Base):
+    __tablename__ = 'payments'
+    id = Column(Integer, primary_key=True)
+    amount = Column(Numeric(10, 2), nullable=False)
+    currency = Column(String(3), nullable=False)
+    status = Column(String(20), nullable=False)
+    deduplication_key = Column(String(255), unique=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+Base.metadata.create_all(engine)
+
+@app.route('/payments', methods=['POST'])
+def process_payment():
+    data = request.json
+    payment_request = PaymentRequest(data['amount'], data['currency'], data['deduplication_key'])
+
+    session = Session()
+    existing_payment = session.query(Payment).filter_by(deduplication_key=payment_request.deduplication_key).first()
+
+    if existing_payment:
+        return jsonify({&quot;status&quot;: existing_payment.status}), 200
+
+    new_payment = Payment(
+        amount=payment_request.amount,
+        currency=payment_request.currency,
+        status='PROCESSING',
+        deduplication_key=payment_request.deduplication_key
+    )
+
+    session.add(new_payment)
+
+    try:
+        session.commit()
+        # Simulate processing payment
+        new_payment.status = 'SUCCESS'
+        session.commit()
+        return jsonify({&quot;status&quot;: new_payment.status}), 201
+    except IntegrityError:
+        session.rollback()
+        return jsonify({&quot;error&quot;: &quot;Duplicate payment detected.&quot;}), 409
+    finally:
+        session.close()
+</code></pre>
+<p>In this implementation, we check if a payment with the provided deduplication key exists. If it does, we return the existing status; if not, we process the payment and update the status accordingly.</p>
+<h2>Failure Modes &amp; Debugging</h2>
+<p>Even with robust design, failures can occur. Here are some common failure modes, symptoms, and potential diagnoses:</p>
+<ol>
+<li><strong>Symptom</strong>: Duplicate payments are being processed.</li>
+<li>
+<p><strong>Diagnosis</strong>: Check the deduplication key's uniqueness in the database. If the database schema does not enforce uniqueness, this could lead to duplicates.</p>
+</li>
+<li>
+<p><strong>Symptom</strong>: Payment status returns as 'PROCESSING' indefinitely.</p>
+</li>
+<li>
+<p><strong>Diagnosis</strong>: Ensure that the payment processing logic is properly updating the payment status. Use logging to trace where the process might be hanging.</p>
+</li>
+<li>
+<p><strong>Symptom</strong>: API returns a 409 error code frequently.</p>
+</li>
+<li><strong>Diagnosis</strong>: Investigate if clients are using the same deduplication key for multiple requests, which might indicate a design flaw in the client-side logic.</li>
+</ol>
+<h2>Trade-offs</h2>
+<p>While implementing idempotency with deduplication keys is powerful, there are trade-offs to consider:</p>
+<ul>
+<li><strong>Storage Overhead</strong>: Each unique deduplication key requires storage. If your application handles a high volume of transactions, this could lead to increased database size.</li>
+<li><strong>Complexity</strong>: The additional layer of deduplication logic increases the complexity of your codebase, making it harder to maintain.</li>
+<li><strong>Latency</strong>: Checking for existing payments may introduce latency especially under high load. </li>
+</ul>
+<p>In scenarios where idempotency is not critical (e.g., non-financial APIs), you may choose to forgo this complexity in favor of simpler designs.</p>
+<h2>Performance &amp; Cost</h2>
+<p>When measuring the performance of our payment API, consider the following metrics:</p>
+<ul>
+<li>
+<p><strong>Latency</strong>: The response time for processing a payment should ideally be under 200ms. If our deduplication check and processing logic start taking longer, we may need to optimize our database queries or consider caching strategies.</p>
+</li>
+<li>
+<p><strong>Throughput</strong>: For a payment gateway handling thousands of transactions per second, we need to ensure our database can handle the load. A typical PostgreSQL instance can handle approximately 300-400 transactions per second under optimal conditions.</p>
+</li>
+<li>
+<p><strong>Cloud Costs</strong>: If deployed on a cloud provider, consider the costs associated with increased database size and read/write operations. For instance, if your database charges $0.</p>
+</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>
