@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Schema Migrations at Scale: Online Changes, Dual Writes, and Rollback Strategies</title>
+  <style>
+    /* Minimal styles for copy/paste/import */
+    body { margin: 0; font: 16px/1.7 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #111; }
+    main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+    article > h1 { margin: 0 0 16px; line-height: 1.2; }
+    pre { overflow: auto; padding: 12px; background: #f6f8fa; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.95em; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: 6px 8px; }
+    a { word-break: break-word; }
+  </style>
+</head>
+<body>
+  <main>
+    <article>
+      <h1>Schema Migrations at Scale: Online Changes, Dual Writes, and Rollback Strategies</h1>
+      <p><em>Transforming your database schema without downtime requires strategic planning and careful execution.</em></p>
+<h2>Thesis</h2>
+<p>As systems evolve, the need for schema migrations becomes inevitable. However, performing schema migrations at scale, especially in high-availability environments, presents significant challenges. This article explores an effective approach to online schema changes using dual writes and rollback strategies, with a focus on a real-world scenario involving a microservices architecture that relies on a PostgreSQL database.</p>
+<h2>Constraints and Design Considerations</h2>
+<p>When designing a schema migration strategy, the following constraints must be considered:</p>
+<ol>
+<li><strong>High Availability</strong>: The system must remain operational during the migration.</li>
+<li><strong>Data Consistency</strong>: The data must remain consistent across versions.</li>
+<li><strong>Performance Impact</strong>: The migration must minimize latency and throughput degradation.</li>
+<li><strong>Rollback Capability</strong>: There should be a straightforward way to revert changes if something goes wrong.</li>
+</ol>
+<h3>Design Approach</h3>
+<p>Given these constraints, we can adopt a dual-write strategy during the migration process. This entails writing to both the old and new schema versions simultaneously until the migration is confirmed successful. </p>
+<h3>Example Scenario</h3>
+<p>For illustration, consider an e-commerce application where we need to migrate the <code>products</code> table to include a new <code>category</code> column. The current schema looks like this:</p>
+<pre><code class="language-sql">CREATE TABLE products (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    price DECIMAL(10, 2) NOT NULL
+);
+</code></pre>
+<p>Our goal is to modify it to:</p>
+<pre><code class="language-sql">CREATE TABLE products (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    price DECIMAL(10, 2) NOT NULL,
+    category VARCHAR(100) NULL
+);
+</code></pre>
+<h2>Implementation Details</h2>
+<h3>Step 1: Prepare the Migration</h3>
+<p>Before making schema changes, we will implement a dual-write mechanism in our service layer. This requires modifying the service responsible for writing product data.</p>
+<pre><code class="language-python">class ProductService:
+    def __init__(self, db_old, db_new):
+        self.db_old = db_old
+        self.db_new = db_new
+
+    def add_product(self, name, price, category=None):
+        # Write to the old schema
+        self.db_old.execute(
+            &quot;INSERT INTO products (name, price) VALUES (%s, %s)&quot;, (name, price)
+        )
+        # Write to the new schema
+        self.db_new.execute(
+            &quot;INSERT INTO products (name, price, category) VALUES (%s, %s, %s)&quot;,
+            (name, price, category)
+        )
+</code></pre>
+<h3>Step 2: Migrate Data</h3>
+<p>Once the dual-write mechanism is in place, we can start the migration. For existing records, we’ll populate the new <code>category</code> column with default values:</p>
+<pre><code class="language-python">def migrate_products(db_old, db_new):
+    products = db_old.execute(&quot;SELECT id, name, price FROM products&quot;)
+    for product in products:
+        db_new.execute(
+            &quot;INSERT INTO products (id, name, price, category) VALUES (%s, %s, %s, %s)&quot;,
+            (product['id'], product['name'], product['price'], &quot;default_category&quot;)
+        )
+</code></pre>
+<h3>Step 3: Update the Application</h3>
+<p>Once the migration of existing data is complete, update the application to read from the new schema. </p>
+<pre><code class="language-python">def get_product(product_id):
+    # Reading from the new schema
+    result = self.db_new.execute(&quot;SELECT * FROM products WHERE id = %s&quot;, (product_id,))
+    return result
+</code></pre>
+<h3>Step 4: Monitor and Rollback</h3>
+<p>After the migration, monitor the system for anomalies. If issues arise, we can easily rollback to the previous version by directing all writes back to the old schema and ceasing writes to the new schema.</p>
+<pre><code class="language-python">def rollback_migration():
+    # Stop writing to the new schema
+    # Ensure all writes go back to the old schema
+    self.write_to_old_schema_only = True
+</code></pre>
+<h2>Validation</h2>
+<p>Validation of the migration process is crucial. Here’s how to ensure everything is functioning as expected:</p>
+<ol>
+<li><strong>Data Consistency Checks</strong>: Periodically compare data between old and new schemas.</li>
+<li><strong>Performance Monitoring</strong>: Analyze latency and throughput metrics during the migration.</li>
+<li><strong>Error Logging</strong>: Implement comprehensive logging around the dual-write paths to catch any discrepancies.</li>
+</ol>
+<h2>Failure Modes &amp; Debugging</h2>
+<h3>Common Symptoms</h3>
+<ol>
+<li><strong>Inconsistent Data</strong>: Observing differences between old and new schemas indicates issues with the dual-write mechanism.</li>
+<li><strong>Increased Latency</strong>: A significant drop in performance metrics could signal that the migration is impacting service responsiveness.</li>
+</ol>
+<h3>Diagnosis</h3>
+<ol>
+<li><strong>Inconsistent Data</strong>: Use SQL queries to compare row counts and specific fields between the two schemas. Example:</li>
+</ol>
+<p><code>sql
+   SELECT COUNT(*) FROM products_old;
+   SELECT COUNT(*) FROM products_new;</code></p>
+<ol>
+<li><strong>Increased Latency</strong>: Use APM tools to monitor request durations pre- and post-migration. Check for slow queries specifically related to the new schema.</li>
+</ol>
+<h2>Trade-offs</h2>
+<p>While dual writes are powerful, they come with trade-offs:</p>
+<ol>
+<li><strong>Increased Complexity</strong>: The service layer becomes more complex, as it must handle writing to both schemas.</li>
+<li><strong>Potential for Data Loss</strong>: If an error occurs after writing to one schema but not the other, data may become inconsistent. </li>
+</ol>
+<h3>When Not to Use Dual Writes</h3>
+<ol>
+<li><strong>Low Traffic Applications</strong>: For systems with low transaction volumes, a simple, sequential migration may be more efficient.</li>
+<li><strong>Single Database Systems</strong>: If the database cannot support concurrent writes, consider using a more traditional approach instead.</li>
+</ol>
+<h2>Performance &amp; Cost</h2>
+<h3>Metrics</h3>
+<ul>
+<li><strong>Latency</strong>: Dual writes may add 10-20 ms per write operation depending on the database load and network latency.</li>
+<li><strong>Throughput</strong>: If the service typically handles 100 writes/second, expect a reduction to approximately 80-90 writes/second during migration.</li>
+</ul>
+<h3>Cost Implications</h3>
+<p>If deploying on a cloud platform, consider additional costs associated with increased read/write operations, which may lead to higher database service charges.</p>
+<h2>Observability</h2>
+<p>Effective observability is critical during schema migrations. Focus on the following:</p>
+<ol>
+<li><strong>Metrics</strong>: Track metrics such as query latencies, error rates, and throughput.</li>
+<li><strong>Logs</strong>: Log every dual write operation, including successes and failures.</li>
+<li><strong>Traces</strong>: Use distributed tracing to identify bottlenecks in the migration process.</li>
+</ol>
+<h3>Alerting</h3>
+<p>Set alerts for key metrics:
+- Latency exceeding 100 ms
+- Error rates above 1% for write operations
+- Discrepancies in row counts between old and new schemas</p>
+    </article>
+  </main>
+</body>
+</html>
