@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Making Microservices Survivable: Timeouts, Hedged Requests, Circuit Breakers, and Fallbacks</title>
+  <style>
+    /* Minimal styles for copy/paste/import */
+    body { margin: 0; font: 16px/1.7 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #111; }
+    main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+    article > h1 { margin: 0 0 16px; line-height: 1.2; }
+    pre { overflow: auto; padding: 12px; background: #f6f8fa; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.95em; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: 6px 8px; }
+    a { word-break: break-word; }
+  </style>
+</head>
+<body>
+  <main>
+    <article>
+      <h1>Making Microservices Survivable: Timeouts, Hedged Requests, Circuit Breakers, and Fallbacks</h1>
+      <p><em>Strategies for enhancing resilience in distributed systems.</em></p>
+<h2>Thesis</h2>
+<p>In a microservices architecture, ensuring service survivability is paramount for maintaining user experience and system reliability. By implementing timeouts, hedged requests, circuit breakers, and fallbacks, we can create a robust framework that mitigates the cascading failures often seen in distributed systems. We will focus on a real-world scenario involving a payment processing microservice that communicates with various external services, demonstrating how these strategies can be effectively applied.</p>
+<h2>Constraints and Design Considerations</h2>
+<h3>Constraints</h3>
+<ol>
+<li><strong>Network latency</strong>: External service calls can introduce unpredictable delays, affecting overall responsiveness.</li>
+<li><strong>Service reliability</strong>: Third-party payment providers may experience outages or slowdowns.</li>
+<li><strong>User experience</strong>: Any delay in processing payments can lead to a poor user experience, risking abandonment of transactions.</li>
+</ol>
+<h3>Design</h3>
+<p>Given these constraints, our design will incorporate the following components:
+- <strong>Timeouts</strong>: To avoid waiting indefinitely for responses from external services.
+- <strong>Hedged requests</strong>: To send parallel requests to multiple services, reducing the chance of failure.
+- <strong>Circuit Breakers</strong>: To prevent the system from making requests to a service that's likely to fail.
+- <strong>Fallbacks</strong>: To provide a graceful degradation of functionality when services are unavailable.</p>
+<h2>Implementation</h2>
+<h3>Timeouts</h3>
+<p>To implement timeouts, we will set a maximum duration for requests to external payment services. In Python, we can use the <code>httpx</code> library, which allows us to specify timeouts easily.</p>
+<pre><code class="language-python">import httpx
+
+async def process_payment(payment_data):
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        response = await client.post(&quot;https://payment-provider.com/api/pay&quot;, json=payment_data)
+        response.raise_for_status()
+        return response.json()
+</code></pre>
+<p>In this example, we set a timeout of 5 seconds. If the payment provider does not respond within this timeframe, a <code>TimeoutException</code> is raised.</p>
+<h3>Hedged Requests</h3>
+<p>Hedged requests can be implemented by sending requests to multiple payment providers simultaneously and using the first successful response. This can be done using <code>asyncio</code> in Python.</p>
+<pre><code class="language-python">import asyncio
+
+async def hedged_payment(payment_data):
+    providers = [
+        &quot;https://payment-provider-a.com/api/pay&quot;,
+        &quot;https://payment-provider-b.com/api/pay&quot;
+    ]
+
+    async def fetch(url):
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            return await client.post(url, json=payment_data)
+
+    tasks = [fetch(provider) for provider in providers]
+    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+
+    for task in done:
+        if task.exception() is None:
+            return task.result().json()
+    raise Exception(&quot;All payment providers failed.&quot;)
+</code></pre>
+<p>In this code, we create a list of providers and use <code>asyncio.wait</code> to handle multiple requests. The first successful payment response is returned, while any failures are managed later.</p>
+<h3>Circuit Breakers</h3>
+<p>A circuit breaker pattern can help prevent excessive load on a failing service. In Python, we can implement a simple circuit breaker class.</p>
+<pre><code class="language-python">import time
+
+class CircuitBreaker:
+    def __init__(self, failure_threshold, recovery_time):
+        self.failure_threshold = failure_threshold
+        self.failure_count = 0
+        self.last_failure_time = None
+        self.recovery_time = recovery_time
+
+    def call(self, func, *args, **kwargs):
+        if self.is_open():
+            raise Exception(&quot;Circuit is open. Please try again later.&quot;)
+
+        try:
+            result = func(*args, **kwargs)
+            self.failure_count = 0  # Reset on success
+            return result
+        except Exception as e:
+            self.failure_count += 1
+            self.last_failure_time = time.time()
+            raise e
+
+    def is_open(self):
+        if self.failure_count &gt;= self.failure_threshold:
+            if time.time() - self.last_failure_time &lt; self.recovery_time:
+                return True
+        return False
+</code></pre>
+<p>In this implementation, we check if the circuit is open before calling the payment function. If the number of failures exceeds the threshold, the circuit will stay open for the specified recovery time.</p>
+<h3>Fallbacks</h3>
+<p>Finally, we can implement fallbacks to provide alternative behavior when a service fails. For example, if both payment providers are unavailable, we could log the transaction for later processing.</p>
+<pre><code class="language-python">async def fallback_payment(payment_data):
+    try:
+        return await hedged_payment(payment_data)
+    except Exception:
+        # Fallback logic
+        log_transaction(payment_data)
+        return {&quot;status&quot;: &quot;pending&quot;, &quot;message&quot;: &quot;Payment processing delayed. Please check back later.&quot;}
+</code></pre>
+<p>In the fallback implementation, we attempt the hedged payment and log the transaction if all attempts fail. </p>
+<h2>Validation</h2>
+<h3>Failure Modes &amp; Debugging</h3>
+<ol>
+<li>
+<p><strong>Timeouts</strong>: If the timeouts are too short, valid requests may fail. Symptoms include frequent timeout exceptions. Diagnosing this can be done by monitoring response times and adjusting timeout durations based on historical data.</p>
+</li>
+<li>
+<p><strong>Hedged Requests</strong>: If the hedged requests are not implemented correctly, this can lead to multiple failures or unintended overload on providers. Symptoms include excessive logs of failures. Using throttling or limiting the number of concurrent requests can mitigate this.</p>
+</li>
+<li>
+<p><strong>Circuit Breakers</strong>: If the threshold values for the circuit breakers are too sensitive, legitimate spikes in traffic may cause unnecessary failures. Symptoms include constant open circuit alerts. Tuning these thresholds based on traffic patterns can help.</p>
+</li>
+<li>
+<p><strong>Fallbacks</strong>: If fallback logic is not adequately tested, it may lead to unhandled cases. Symptoms include unprocessed transactions. Extensive unit and integration testing can reveal weaknesses in fallback logic.</p>
+</li>
+</ol>
+<h2>Trade-offs</h2>
+<h3>When NOT to Use This Approach</h3>
+<ol>
+<li>
+<p><strong>High Throughput Systems</strong>: If your system handles a very high volume of requests, implementing all these strategies may introduce additional overhead that could degrade performance.</p>
+</li>
+<li>
+<p><strong>Simple Service Calls</strong>: In scenarios where the service calls are guaranteed to be reliable (e.g., internal services with high SLAs), the overhead of implementing these patterns may outweigh their benefits.</p>
+</li>
+<li>
+<p><strong>Latency-Sensitive Applications</strong>: If your application is extremely sensitive to latency, the additional complexity and time introduced by circuit breakers and hedged requests may not be ideal.</p>
+</li>
+</ol>
+<h2>Performance &amp; Cost</h2>
+<h3>Latency and Throughput</h3>
+<ul>
+<li><strong>Timeouts</strong>: Setting a timeout of 5 seconds means a user waits up to 5 seconds per request. If using hedged requests, this may double the wait time, leading to a maximum of 10 seconds for simultaneous</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>
