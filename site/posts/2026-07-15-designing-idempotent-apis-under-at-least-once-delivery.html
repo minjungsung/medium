@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Designing Idempotent APIs Under At-Least-Once Delivery</title>
+  <style>
+    /* Minimal styles for copy/paste/import */
+    body { margin: 0; font: 16px/1.7 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #111; }
+    main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+    article > h1 { margin: 0 0 16px; line-height: 1.2; }
+    pre { overflow: auto; padding: 12px; background: #f6f8fa; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.95em; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: 6px 8px; }
+    a { word-break: break-word; }
+  </style>
+</head>
+<body>
+  <main>
+    <article>
+      <h1>Designing Idempotent APIs Under At-Least-Once Delivery</h1>
+      <p><em>An exploration of retries, deduplication keys, and failure semantics in a microservices architecture.</em></p>
+<p>In a distributed system where message delivery is not guaranteed to be exactly-once, designing idempotent APIs becomes crucial for maintaining consistency and reliability. This article will focus on a payment processing system that interacts with multiple microservices, emphasizing how to ensure idempotency while supporting at-least-once delivery semantics. </p>
+<h2>Constraints</h2>
+<h3>System Requirements</h3>
+<ol>
+<li><strong>High Availability</strong>: The payment processing system must be able to handle multiple requests simultaneously and remain operational even if some services fail.</li>
+<li><strong>At-Least-Once Delivery</strong>: External services may retry requests, leading to potential duplicate requests.</li>
+<li><strong>Consistency</strong>: The system must maintain a consistent state after processing requests, regardless of the number of times a request is received.</li>
+<li><strong>Scalability</strong>: The API should scale horizontally with an increasing number of transactions.</li>
+</ol>
+<h3>Assumptions</h3>
+<ul>
+<li>The API client can generate unique deduplication keys for each request.</li>
+<li>The payment processing service can maintain state in a persistent datastore.</li>
+<li>The system will utilize a message broker (like Kafka or RabbitMQ) to handle requests asynchronously.</li>
+</ul>
+<h2>Design</h2>
+<h3>Idempotency Strategy</h3>
+<p>To ensure idempotency, we will use a combination of deduplication keys and a state machine. Each API request will include a unique deduplication key that identifies the transaction. This key will be stored in a database alongside the transaction state.</p>
+<h4>State Machine</h4>
+<p>The payment processing workflow can be modeled with the following states:
+- <strong>Pending</strong>: The initial state after the request is received.
+- <strong>Completed</strong>: The transaction has been successfully processed.
+- <strong>Failed</strong>: An error occurred during processing.</p>
+<h3>API Design</h3>
+<p>The payment API will have the following endpoint:</p>
+<pre><code class="language-http">POST /api/payments
+Content-Type: application/json
+
+{
+  &quot;amount&quot;: 100.00,
+  &quot;currency&quot;: &quot;USD&quot;,
+  &quot;deduplication_key&quot;: &quot;unique-key-12345&quot;
+}
+</code></pre>
+<h3>Implementation</h3>
+<h4>Data Model</h4>
+<p>We will create a SQL table to track payment transactions:</p>
+<pre><code class="language-sql">CREATE TABLE payments (
+    id SERIAL PRIMARY KEY,
+    deduplication_key VARCHAR(255) UNIQUE NOT NULL,
+    amount DECIMAL(10, 2) NOT NULL,
+    currency VARCHAR(3) NOT NULL,
+    status VARCHAR(20) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+</code></pre>
+<h4>Payment Processing Logic</h4>
+<p>The following is a simplified implementation of the payment processing service in Python using Flask:</p>
+<pre><code class="language-python">from flask import Flask, request, jsonify
+from sqlalchemy import create_engine, Column, String, Integer, Numeric, DateTime
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.declarative import declarative_base
+from datetime import datetime
+
+app = Flask(__name__)
+Base = declarative_base()
+engine = create_engine('postgresql://user:password@localhost/mydatabase')
+Session = sessionmaker(bind=engine)
+session = Session()
+
+class Payment(Base):
+    __tablename__ = 'payments'
+    id = Column(Integer, primary_key=True)
+    deduplication_key = Column(String, unique=True, nullable=False)
+    amount = Column(Numeric(10, 2), nullable=False)
+    currency = Column(String(3), nullable=False)
+    status = Column(String(20), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+@app.route('/api/payments', methods=['POST'])
+def create_payment():
+    data = request.json
+    deduplication_key = data.get(&quot;deduplication_key&quot;)
+    amount = data.get(&quot;amount&quot;)
+    currency = data.get(&quot;currency&quot;)
+
+    existing_payment = session.query(Payment).filter_by(deduplication_key=deduplication_key).first()
+
+    if existing_payment:
+        return jsonify({&quot;status&quot;: existing_payment.status}), 200
+
+    new_payment = Payment(deduplication_key=deduplication_key, amount=amount, currency=currency, status='Pending')
+    session.add(new_payment)
+    session.commit()
+
+    # Simulate processing the payment
+    # TODO: Integrate with billing system
+    new_payment.status = 'Completed'
+    session.commit()
+
+    return jsonify({&quot;status&quot;: new_payment.status}), 201
+
+if __name__ == '__main__':
+    app.run()
+</code></pre>
+<h3>Validation</h3>
+<h4>Testing for Idempotency</h4>
+<p>To validate the idempotency of the API, we can perform the following tests:</p>
+<ol>
+<li><strong>Single Request Test</strong>: Send a request to create a payment and verify that it returns a "Completed" status.</li>
+<li><strong>Duplicate Request Test</strong>: Send the same request again with the same deduplication key and verify that it returns the same "Completed" status without creating a duplicate entry.</li>
+</ol>
+<pre><code class="language-bash"># Test 1: Initial payment request
+curl -X POST http://localhost:5000/api/payments -H &quot;Content-Type: application/json&quot; -d '{&quot;amount&quot;: 100.00, &quot;currency&quot;: &quot;USD&quot;, &quot;deduplication_key&quot;: &quot;unique-key-12345&quot;}'
+
+# Test 2: Duplicate payment request
+curl -X POST http://localhost:5000/api/payments -H &quot;Content-Type: application/json&quot; -d '{&quot;amount&quot;: 100.00, &quot;currency&quot;: &quot;USD&quot;, &quot;deduplication_key&quot;: &quot;unique-key-12345&quot;}'
+</code></pre>
+<h2>Failure Modes &amp; Debugging</h2>
+<h3>Common Symptoms</h3>
+<ol>
+<li><strong>Duplicate Transactions</strong>: If the API is not properly handling deduplication keys, clients may experience multiple transactions for the same request.</li>
+<li><strong>Unexpected Status</strong>: Clients might receive an unexpected status code (e.g., 500 Internal Server Error) when processing a request.</li>
+<li><strong>Transaction Not Found</strong>: When querying for a transaction by deduplication key, it may not exist if the insert failed.</li>
+</ol>
+<h3>Diagnosis</h3>
+<ul>
+<li><strong>Logs</strong>: Monitor application logs for errors during transaction processing.</li>
+<li><strong>Database Constraints</strong>: Check for violations of unique constraints on the deduplication key in the database.</li>
+</ul>
+<h2>Trade-offs</h2>
+<h3>When NOT to Use This Approach</h3>
+<ul>
+<li><strong>Low Throughput Services</strong>: If your service does not require high availability or can handle at-most-once delivery, the complexity of implementing an idempotent API may not be justified.</li>
+<li><strong>Simple Microservices</strong>: For microservices with a straightforward request-response model and no external retries, a typical REST API without deduplication may suffice.</li>
+</ul>
+<h2>Performance &amp; Cost</h2>
+<h3>Latency and Throughput</h3>
+<p>Using a relational database with unique constraints may introduce additional latency due to index management. For instance, inserting a payment could take approximately 10ms, but querying for an existing transaction to check for duplication could add another 5ms. </p>
+<p>If</p>
+    </article>
+  </main>
+</body>
+</html>
