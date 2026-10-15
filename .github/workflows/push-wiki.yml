@@ -5,12 +5,21 @@ on:
     paths: ["wiki/**"]
   workflow_dispatch:
 jobs:
+  verify-publication:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/strict-project-validation.yml
+    permissions:
+      contents: read
   push-wiki:
+    if: github.ref == 'refs/heads/main'
+    needs: verify-publication
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
       - name: Push wiki pages
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -19,11 +28,7 @@ jobs:
           git config --global user.email "minjungsung1994@gmail.com"
           git config --global user.name "minjungsung"
           TMPDIR=$(mktemp -d)
-          git clone "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.wiki.git" "$TMPDIR" 2>/dev/null || {
-            echo "Wiki not initialized. Please create the first page manually at:"
-            echo "https://github.com/${{ github.repository }}/wiki/_new"
-            exit 0
-          }
+          git clone "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.wiki.git" "$TMPDIR"
           cp wiki/*.md "$TMPDIR/"
           cd "$TMPDIR"
           git add -A
