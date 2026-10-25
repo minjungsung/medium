@@ -1,4 +1,4 @@
 openai>=3.36.1
 python-dotenv>=1.2.4
 requests>=2.34.2
-Markdown>=3.11.1
+Markdown>=3.11.2
