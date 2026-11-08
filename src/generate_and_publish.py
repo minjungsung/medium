@@ -36,17 +36,44 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 LLM_PROVIDER = (os.getenv("LLM_PROVIDER") or "openai").strip().lower()
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN") or os.getenv("GH_MODELS_TOKEN")
-GITHUB_MODELS_BASE_URL = (os.getenv("GITHUB_MODELS_BASE_URL") or "https://models.inference.ai.azure.com").strip()
+
+# GitHub Models retired the Azure-hosted endpoint on 2025-10-17 (models.inference.ai.azure.com
+# no longer resolves); the supported inference endpoint is https://models.github.ai/inference.
+GITHUB_MODELS_BASE_URL = (os.getenv("GITHUB_MODELS_BASE_URL") or "https://models.github.ai/inference").strip()
 if GITHUB_MODELS_BASE_URL and not (GITHUB_MODELS_BASE_URL.startswith("http://") or GITHUB_MODELS_BASE_URL.startswith("https://")):
     GITHUB_MODELS_BASE_URL = "https://" + GITHUB_MODELS_BASE_URL
+_RETIRED_GITHUB_MODELS_HOST = "models.inference.ai.azure.com"
+if _RETIRED_GITHUB_MODELS_HOST in GITHUB_MODELS_BASE_URL:
+    print(
+        f"warning: {_RETIRED_GITHUB_MODELS_HOST} is retired and no longer resolves; "
+        "using https://models.github.ai/inference instead. "
+        "Update GITHUB_MODELS_BASE_URL to silence this warning."
+    )
+    GITHUB_MODELS_BASE_URL = "https://models.github.ai/inference"
+
+_USES_GITHUB_MODELS = LLM_PROVIDER in ("github", "github_models", "gh", "github-models")
 MEDIUM_TOKEN = os.getenv("MEDIUM_INTEGRATION_TOKEN")
 DEFAULT_PUBLISH_STATUS = os.getenv("DEFAULT_PUBLISH_STATUS", "draft")
+
+def github_models_model_id(model: str) -> str:
+    """GitHub Models expects `publisher/model`; a bare name (e.g. gpt-4o-mini) is rejected."""
+    model = (model or "").strip()
+    if not model:
+        return "openai/gpt-4o-mini"
+    if "/" in model:
+        return model
+    return f"openai/{model}"
+
+
+def resolved_model_id() -> str:
+    return github_models_model_id(OPENAI_MODEL) if _USES_GITHUB_MODELS else OPENAI_MODEL
+
 
 def _make_client():
     if not _OPENAI_V1:
         return None
 
-    if LLM_PROVIDER in ("github", "github_models", "gh", "github-models"):
+    if _USES_GITHUB_MODELS:
         if not GITHUB_TOKEN:
             raise RuntimeError(
                 "LLM_PROVIDER=github_models but GITHUB_TOKEN (or GH_MODELS_TOKEN) is missing.\n"
@@ -113,7 +140,7 @@ def generate_article(topic: str, audience: str = "senior software engineers", le
 
     if _OPENAI_V1:
         resp = _client.chat.completions.create(
-            model=OPENAI_MODEL,
+            model=resolved_model_id(),
             messages=messages,
             temperature=0.7,
             max_tokens=1400,
@@ -121,7 +148,7 @@ def generate_article(topic: str, audience: str = "senior software engineers", le
         text = resp.choices[0].message.content.strip() if resp.choices[0].message.content else ""
     else:  # pragma: no cover
         resp = openai.ChatCompletion.create(  # type: ignore
-            model=OPENAI_MODEL,
+            model=resolved_model_id(),
             messages=messages,
             temperature=0.7,
             max_tokens=1400,
