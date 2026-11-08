@@ -69,6 +69,22 @@ def resolved_model_id() -> str:
     return github_models_model_id(OPENAI_MODEL) if _USES_GITHUB_MODELS else OPENAI_MODEL
 
 
+def _completion_text(resp) -> str:
+    """Return the assistant text, failing loudly when the endpoint answers with something
+    other than a chat completion (wrong URL, blocked egress, proxy or gateway placeholder).
+    """
+    choices = getattr(resp, "choices", None)
+    if not choices:
+        body = resp if isinstance(resp, str) else repr(resp)
+        raise RuntimeError(
+            "Unexpected response from "
+            f"{GITHUB_MODELS_BASE_URL if _USES_GITHUB_MODELS else 'OpenAI'} "
+            f"for model {resolved_model_id()}: {body[:300]!r}"
+        )
+    content = choices[0].message.content
+    return content.strip() if content else ""
+
+
 def _make_client():
     if not _OPENAI_V1:
         return None
@@ -145,7 +161,7 @@ def generate_article(topic: str, audience: str = "senior software engineers", le
             temperature=0.7,
             max_tokens=1400,
         )
-        text = resp.choices[0].message.content.strip() if resp.choices[0].message.content else ""
+        text = _completion_text(resp)
     else:  # pragma: no cover
         resp = openai.ChatCompletion.create(  # type: ignore
             model=resolved_model_id(),
