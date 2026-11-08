@@ -379,18 +379,18 @@ def build_site_index(posts_dir: str, site_dir: str, limit: int = 60) -> str:
 def default_topic() -> str:
     today = _dt.date.today()
     topics = [
-        "Designing idempotent APIs under at-least-once delivery (retries, dedup keys, and failure semantics)",
-        "Advanced caching in distributed systems: stampede prevention, negative caching, and consistency trade-offs",
-        "Debugging production latency: percentile thinking, tail amplification, and tracing-driven optimization",
-        "Backpressure end-to-end: from load balancers to queues to thread pools",
-        "PostgreSQL performance deep dive: indexing strategy, query plans, and lock contention patterns",
-        "Concurrency in Python beyond the basics: asyncio pitfalls, structured concurrency, and cancellation safety",
-        "Observability that actually works: SLOs, error budgets, and high-signal alert design",
-        "Schema migrations at scale: online changes, dual writes, and rollback strategies",
-        "Making microservices survivable: timeouts, hedged requests, circuit breakers, and fallbacks",
-        "Reliable event-driven systems: ordering, exactly-once illusions, and consumer reprocessing",
-        "Incident response for engineers: fast containment, safe rollbacks, and learning without blame",
-        "Cost-aware engineering: measuring and reducing cloud spend without hurting reliability",
+        "Chunking vs. Late Chunking vs. Contextual Retrieval in Production RAG",
+        "Hybrid Search with BM25, Dense Embeddings, and Reciprocal Rank Fusion (RRF)",
+        "KV Cache Management & PagedAttention: Reducing Memory Footprint in High-Throughput LLM Serving",
+        "Speculative Decoding in Production: Throughput vs. Latency Trade-offs in Self-Hosted LLMs",
+        "Building Reliable LLM Agents: Why State Machines Beat Autonomous ReAct Loops",
+        "Structured Outputs in Production: Eliminating Schema Drift with Pydantic, Instructor, and BAML",
+        "Semantic Caching for LLM APIs: Cache Invalidation, Embedding Distance, and Cost Reduction",
+        "Smart Prompt Routing & Model Cascades: Cutting Token Costs 80% with Smaller Specialist Models",
+        "Production Vector Search at Scale: HNSW vs. IVF-PQ Trade-offs and Index Tuning",
+        "Fine-tuning vs. In-Context Learning vs. RAG: Real-World Cost, Latency, and Maintenance Matrix",
+        "LLM-as-a-Judge in CI/CD: Building Automated Evaluation Pipelines That Correlate with Human Preference",
+        "Local LLM Inference Architecture: Comparing vLLM, Ollama, and llama.cpp for Production Edge Workloads",
     ]
 
     topic = topics[today.toordinal() % len(topics)]
