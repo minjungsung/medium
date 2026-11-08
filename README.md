@@ -15,7 +15,7 @@ This repo generates one developer-focused post per day (in English), saves it as
 
 - `LLM_PROVIDER=github_models` (recommended)
 - `GITHUB_TOKEN=...` (or `GH_MODELS_TOKEN=...`)
-- `OPENAI_MODEL=...`
+- `OPENAI_MODEL=openai/gpt-4o-mini` (`publisher/model` form for GitHub Models)
 
 2) Install dependencies:
 
@@ -37,8 +37,10 @@ The daily generator workflow is at `.github/workflows/daily_generate.yml`.
 
 Add these repo secrets:
 
-- `GH_MODELS_TOKEN` (required)
-- `OPENAI_MODEL` (optional; defaults to `gpt-4o-mini`)
+- `GH_MODELS_TOKEN` (optional; if unset, the workflow uses the built-in `GITHUB_TOKEN` with `models: read`)
+- `OPENAI_MODEL` (optional; defaults to `openai/gpt-4o-mini`, a publisher/model id — required by the current GitHub Models API)
+
+The workflow calls `https://models.github.ai/inference`. The old Azure endpoint (`models.inference.ai.azure.com`) was retired and no longer resolves.
 
 Then run the workflow manually once from the Actions tab to verify it works.
 

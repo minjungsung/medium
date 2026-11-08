@@ -1,0 +1,8 @@
+# False positives: example idempotency keys inside generated article code samples.
+# Verified with TruffleHog (0 live secrets). Pinned by fingerprint so new findings still fail.
+eddee411ecf2bc192fa2941803442b98f7075199:posts/2026-07-15-designing-idempotent-apis-under-at-least-once-delivery.md:generic-api-key:40
+eddee411ecf2bc192fa2941803442b98f7075199:posts/2026-07-15-designing-idempotent-apis-under-at-least-once-delivery.md:generic-api-key:122
+eddee411ecf2bc192fa2941803442b98f7075199:posts/2026-07-15-designing-idempotent-apis-under-at-least-once-delivery.md:generic-api-key:125
+c4a08a51f1f8a67607c47107dbfb123c2d8f5175:posts/2026-06-09-designing-idempotent-apis-under-at-least-once-delivery.md:generic-api-key:34
+c4a08a51f1f8a67607c47107dbfb123c2d8f5175:posts/2026-06-09-designing-idempotent-apis-under-at-least-once-delivery.md:generic-api-key:109
+c4a08a51f1f8a67607c47107dbfb123c2d8f5175:posts/2026-06-09-designing-idempotent-apis-under-at-least-once-delivery.md:generic-api-key:112
