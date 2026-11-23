@@ -36,13 +36,20 @@ jobs:
         run: |
           python -m pip install -r requirements.txt
 
+      # GitHub Models (models.github.ai) was retired on 2026-07-30 and now answers every
+      # request with a bare "OK", so the provider is selected from repository settings.
+      # LLM_PROVIDER   (variable, default openai)
+      # LLM_BASE_URL   (variable, optional: any OpenAI-compatible endpoint)
+      # LLM_MODEL      (variable, default gpt-4o-mini)
+      # LLM_API_KEY    (secret, fallback OPENAI_API_KEY)
       - name: Generate post
         env:
-          LLM_PROVIDER: github_models
-          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL || 'gpt-4o-mini' }}
-          GITHUB_TOKEN: ${{ secrets.GH_MODELS_TOKEN }}
+          LLM_PROVIDER: ${{ vars.LLM_PROVIDER || 'openai' }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
+          LLM_MODEL: ${{ vars.LLM_MODEL || 'gpt-4o-mini' }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY || secrets.OPENAI_API_KEY }}
         run: |
-          python src/generate_and_publish.py --action generate --outdir posts --site_dir site
+          python src/generate_and_publish.py --action generate --allow-skip --outdir posts --site_dir site
 
       - name: Commit generated post
         run: |
