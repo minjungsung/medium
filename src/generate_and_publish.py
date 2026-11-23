@@ -5,12 +5,28 @@ Note:
     Medium's legacy Integration Token / Developer API may not be available for new users.
     Even without a Medium token, this script can still generate a daily post and save it to files.
 
+LLM providers (LLM_PROVIDER)
+    openai           Any OpenAI-compatible Chat Completions API (default).
+                     Use LLM_BASE_URL to point at OpenAI, Azure AI Foundry, Gemini's
+                     OpenAI-compatible endpoint, Groq, OpenRouter, a local server, ...
+    github_models    RETIRED. GitHub Models was fully retired on 2026-07-30; the host now
+                     answers every request with a bare "OK" (HTTP 200, text/plain).
+                     Choosing this provider exits immediately with an explanation instead of
+                     failing inside the response parser.
+
+Configuration
+    LLM_API_KEY  (or OPENAI_API_KEY)   required
+    LLM_BASE_URL (or OPENAI_BASE_URL)  optional; defaults to the SDK's OpenAI endpoint
+    LLM_MODEL    (or OPENAI_MODEL)     optional; defaults to gpt-4o-mini
+
 Examples:
     python src/generate_and_publish.py --action generate --topic "Asyncio tips" --outdir posts --site_dir site
     python src/generate_and_publish.py --action generate --outdir posts --site_dir site  # auto topic
     python src/generate_and_publish.py --action publish --topic "Asyncio tips" --publish_status draft
+    python src/generate_and_publish.py --check-provider
 """
 import os
+import sys
 import argparse
 import re
 import datetime as _dt
@@ -22,91 +38,232 @@ from dotenv import load_dotenv
 import markdown as _md
 
 try:
-        from openai import OpenAI
+    from openai import OpenAI
 
-        _OPENAI_V1 = True
+    _OPENAI_V1 = True
 except Exception:  # pragma: no cover
-        import openai  # type: ignore
+    import openai  # type: ignore
 
-        _OPENAI_V1 = False
+    _OPENAI_V1 = False
 
 load_dotenv()
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-LLM_PROVIDER = (os.getenv("LLM_PROVIDER") or "openai").strip().lower()
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN") or os.getenv("GH_MODELS_TOKEN")
+# --------------------------------------------------------------------------------------
+# Provider configuration
+# --------------------------------------------------------------------------------------
 
-# GitHub Models retired the Azure-hosted endpoint on 2025-10-17 (models.inference.ai.azure.com
-# no longer resolves); the supported inference endpoint is https://models.github.ai/inference.
-GITHUB_MODELS_BASE_URL = (os.getenv("GITHUB_MODELS_BASE_URL") or "https://models.github.ai/inference").strip()
-if GITHUB_MODELS_BASE_URL and not (GITHUB_MODELS_BASE_URL.startswith("http://") or GITHUB_MODELS_BASE_URL.startswith("https://")):
-    GITHUB_MODELS_BASE_URL = "https://" + GITHUB_MODELS_BASE_URL
-_RETIRED_GITHUB_MODELS_HOST = "models.inference.ai.azure.com"
-if _RETIRED_GITHUB_MODELS_HOST in GITHUB_MODELS_BASE_URL:
-    print(
-        f"warning: {_RETIRED_GITHUB_MODELS_HOST} is retired and no longer resolves; "
-        "using https://models.github.ai/inference instead. "
-        "Update GITHUB_MODELS_BASE_URL to silence this warning."
-    )
-    GITHUB_MODELS_BASE_URL = "https://models.github.ai/inference"
+PROVIDER_ALIASES = {
+    "": "openai",
+    "openai": "openai",
+    "openai-compatible": "openai",
+    "openai_compatible": "openai",
+    "openai-completions": "openai",
+    "azure": "openai",
+    "azure-openai": "openai",
+    "foundry": "openai",
+    "gemini": "openai",
+    "google": "openai",
+    "groq": "openai",
+    "openrouter": "openai",
+    "ollama": "openai",
+    "github": "github_models",
+    "github_models": "github_models",
+    "github-models": "github_models",
+    "gh": "github_models",
+}
 
-_USES_GITHUB_MODELS = LLM_PROVIDER in ("github", "github_models", "gh", "github-models")
+GITHUB_MODELS_RETIRED_ON = "2026-07-30"
+RETIRED_MODEL_HOSTS = ("models.github.ai", "models.inference.ai.azure.com")
+
+GITHUB_MODELS_RETIREMENT_MESSAGE = (
+    "GitHub Models was fully retired on "
+    f"{GITHUB_MODELS_RETIRED_ON}, so https://models.github.ai/inference no longer serves "
+    "inference to any customer: it now answers every request with HTTP 200, "
+    "content-type text/plain and the body 'OK'. That is the text this job used to report as "
+    "'Unexpected response ... OK'.\n"
+    "Pick another provider and set it in the repository secrets/variables:\n"
+    "  LLM_PROVIDER=openai (default)\n"
+    "  LLM_API_KEY=<key>            # e.g. OpenAI, Azure AI Foundry, Gemini, Groq\n"
+    "  LLM_BASE_URL=<optional>      # only for non-OpenAI OpenAI-compatible endpoints\n"
+    "  LLM_MODEL=<optional>         # defaults to gpt-4o-mini\n"
+    "GitHub's own replacement for workflow inference is actions/ai-inference (Copilot); "
+    "Microsoft points GitHub Models users at Azure AI Foundry."
+)
+
+
+class ProviderError(RuntimeError):
+    """Base class for provider configuration/call problems."""
+
+
+class ProviderNotConfigured(ProviderError):
+    """No usable credential is set, so generation cannot run."""
+
+
+class ProviderRetired(ProviderError):
+    """The configured provider no longer exists upstream."""
+
+
+def _env(*names: str) -> str:
+    for name in names:
+        value = os.getenv(name)
+        if value and value.strip():
+            return value.strip()
+    return ""
+
+
+def resolve_provider() -> str:
+    raw = (os.getenv("LLM_PROVIDER") or "").strip().lower()
+    provider = PROVIDER_ALIASES.get(raw)
+    if provider is None:
+        provider = "openai" if raw.startswith("openai") else raw
+    if provider == "github_models":
+        raise ProviderRetired(GITHUB_MODELS_RETIREMENT_MESSAGE)
+    if provider != "openai":
+        raise ProviderError(
+            f"Unknown LLM_PROVIDER {raw!r}. Supported: openai (any OpenAI-compatible API), "
+            "or github_models (retired)."
+        )
+    base_url = _env("LLM_BASE_URL", "OPENAI_BASE_URL", "GITHUB_MODELS_BASE_URL")
+    if any(host in base_url for host in RETIRED_MODEL_HOSTS):
+        raise ProviderRetired(GITHUB_MODELS_RETIREMENT_MESSAGE)
+    return provider
+
+
+def api_key() -> str:
+    return _env("LLM_API_KEY", "OPENAI_API_KEY")
+
+
+def base_url() -> str:
+    return _env("LLM_BASE_URL", "OPENAI_BASE_URL", "GITHUB_MODELS_BASE_URL")
+
+
+def model_id() -> str:
+    return _env("LLM_MODEL", "OPENAI_MODEL") or "gpt-4o-mini"
+
+
+def missing_configuration() -> str:
+    """Return a human-readable reason generation cannot run, or an empty string."""
+    if resolve_provider() != "openai":  # pragma: no cover - resolve_provider raises first
+        return "No usable LLM provider is configured."
+    if not api_key():
+        return (
+            "No LLM credential is configured (LLM_API_KEY or OPENAI_API_KEY is empty). "
+            "GitHub Models, the previous provider, was retired on "
+            f"{GITHUB_MODELS_RETIRED_ON}, so a new provider key is required."
+        )
+    return ""
+
+
 MEDIUM_TOKEN = os.getenv("MEDIUM_INTEGRATION_TOKEN")
 DEFAULT_PUBLISH_STATUS = os.getenv("DEFAULT_PUBLISH_STATUS", "draft")
 
-def github_models_model_id(model: str) -> str:
-    """GitHub Models expects `publisher/model`; a bare name (e.g. gpt-4o-mini) is rejected."""
-    model = (model or "").strip()
-    if not model:
-        return "openai/gpt-4o-mini"
-    if "/" in model:
-        return model
-    return f"openai/{model}"
+_client = None
 
 
-def resolved_model_id() -> str:
-    return github_models_model_id(OPENAI_MODEL) if _USES_GITHUB_MODELS else OPENAI_MODEL
+def _get_client():
+    global _client
+    if _client is not None:
+        return _client
+    if not _OPENAI_V1:  # pragma: no cover
+        raise ProviderError(
+            "openai>=1 is required (the installed 'openai' package has no OpenAI client). "
+            "Run: python -m pip install -r requirements.txt"
+        )
+    kwargs = {"api_key": api_key(), "max_retries": 3, "timeout": 300.0}
+    url = base_url()
+    if url:
+        if not (url.startswith("http://") or url.startswith("https://")):
+            url = "https://" + url
+        kwargs["base_url"] = url
+    _client = OpenAI(**kwargs)
+    return _client
+
+
+def _body_text(payload) -> str:
+    if payload is None:
+        return ""
+    if isinstance(payload, (bytes, bytearray)):
+        return payload.decode("utf-8", "replace")
+    if isinstance(payload, str):
+        return payload
+    return repr(payload)
+
+
+def _retirement_hint(body: str) -> str:
+    if body.strip().lower() in ("ok", "ok.", "healthy"):
+        return (
+            "\nA bare 'OK' body is what the retired GitHub Models host (models.github.ai) "
+            f"returns for every request since {GITHUB_MODELS_RETIRED_ON}. "
+            "If LLM_BASE_URL still points there, switch providers."
+        )
+    return ""
 
 
 def _completion_text(resp) -> str:
     """Return the assistant text, failing loudly when the endpoint answers with something
-    other than a chat completion (wrong URL, blocked egress, proxy or gateway placeholder).
+    other than a chat completion (dead endpoint, wrong URL, blocked egress, proxy or
+    gateway placeholder).
     """
     choices = getattr(resp, "choices", None)
     if not choices:
-        body = resp if isinstance(resp, str) else repr(resp)
+        body = _body_text(resp)
         raise RuntimeError(
-            "Unexpected response from "
-            f"{GITHUB_MODELS_BASE_URL if _USES_GITHUB_MODELS else 'OpenAI'} "
-            f"for model {resolved_model_id()}: {body[:300]!r}"
+            "The LLM endpoint answered without a chat completion "
+            f"(model {model_id()}, base_url {base_url() or 'https://api.openai.com/v1'}): "
+            f"{body[:300]!r}.{_retirement_hint(body)}"
         )
-    content = choices[0].message.content
-    return content.strip() if content else ""
+    message = getattr(choices[0], "message", None)
+    content = getattr(message, "content", None)
+    if isinstance(choices[0], dict):  # pragma: no cover - defensive for dict-shaped payloads
+        content = (choices[0].get("message") or {}).get("content")
+    text = (content or "").strip()
+    if not text:
+        raise RuntimeError(
+            "The LLM endpoint returned an empty completion "
+            f"(model {model_id()}). Check the model name and the provider quota."
+        )
+    return text
 
 
-def _make_client():
-    if not _OPENAI_V1:
-        return None
-
-    if _USES_GITHUB_MODELS:
-        if not GITHUB_TOKEN:
-            raise RuntimeError(
-                "LLM_PROVIDER=github_models but GITHUB_TOKEN (or GH_MODELS_TOKEN) is missing.\n"
-                "- Set a token that has access to GitHub Models in your environment variables."
-            )
-        return OpenAI(api_key=GITHUB_TOKEN, base_url=GITHUB_MODELS_BASE_URL)
-
-    # default: OpenAI
-    if not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY not set in env")
-    return OpenAI(api_key=OPENAI_API_KEY)
+def _describe_failure(exc: Exception) -> str:
+    parts = [f"{type(exc).__name__}: {exc}"]
+    status = getattr(exc, "status_code", None)
+    if status:
+        parts.append(f"HTTP status: {status}")
+    response = getattr(exc, "response", None)
+    if response is not None:
+        body = _body_text(getattr(response, "text", ""))
+        if body:
+            parts.append(f"response body: {body[:300]!r}{_retirement_hint(body)}")
+    return "LLM request failed for model " + model_id() + " at " + (
+        base_url() or "https://api.openai.com/v1"
+    ) + "\n" + "\n".join(parts)
 
 
-if _OPENAI_V1:
-    _client = _make_client()
-else:  # pragma: no cover
-    openai.api_key = OPENAI_API_KEY  # type: ignore
+def _in_actions() -> bool:
+    return os.getenv("GITHUB_ACTIONS", "").strip().lower() == "true"
+
+
+def _annotate(level: str, message: str) -> None:
+    if _in_actions():
+        first_line = message.strip().splitlines()[0]
+        print(f"::{level}::{first_line}")
+    print(message, file=sys.stderr if level in ("error", "warning") else sys.stdout)
+
+
+def _write_step_summary(message: str) -> None:
+    path = os.getenv("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    try:
+        Path(path).write_text(f"### Daily Medium draft\n\n{message}\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+# --------------------------------------------------------------------------------------
+# Generation
+# --------------------------------------------------------------------------------------
 
 
 def generate_article(topic: str, audience: str = "senior software engineers", length: str = "~1400-1800 words") -> dict:
@@ -154,22 +311,20 @@ def generate_article(topic: str, audience: str = "senior software engineers", le
         {"role": "user", "content": prompt},
     ]
 
-    if _OPENAI_V1:
-        resp = _client.chat.completions.create(
-            model=resolved_model_id(),
+    client = _get_client()
+    try:
+        resp = client.chat.completions.create(
+            model=model_id(),
             messages=messages,
             temperature=0.7,
             max_tokens=1400,
         )
-        text = _completion_text(resp)
-    else:  # pragma: no cover
-        resp = openai.ChatCompletion.create(  # type: ignore
-            model=resolved_model_id(),
-            messages=messages,
-            temperature=0.7,
-            max_tokens=1400,
-        )
-        text = resp["choices"][0]["message"]["content"].strip()
+    except ProviderError:  # pragma: no cover - configuration problems are raised earlier
+        raise
+    except Exception as exc:
+        raise RuntimeError(_describe_failure(exc)) from exc
+
+    text = _completion_text(resp)
 
     # A simple split: consider first heading as title if present
     return {"markdown": normalize_markdown_for_medium(text)}
@@ -397,6 +552,29 @@ def default_topic() -> str:
     return f"{topic} ({today.isoformat()})"
 
 
+def provider_report() -> dict:
+    report = {
+        "provider": "openai",
+        "base_url": base_url() or "https://api.openai.com/v1",
+        "model": model_id(),
+        "api_key": "set" if api_key() else "missing",
+        "ready": False,
+        "reason": "",
+    }
+    try:
+        resolve_provider()
+    except ProviderRetired as exc:
+        report.update(provider="github_models (retired)", ready=False, reason=str(exc))
+        return report
+    except ProviderError as exc:
+        report.update(ready=False, reason=str(exc))
+        return report
+    reason = missing_configuration()
+    report["ready"] = not reason
+    report["reason"] = reason
+    return report
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--action", choices=["generate", "publish", "generate_and_publish"], default="generate")
@@ -405,11 +583,61 @@ def main():
     p.add_argument("--site_dir", default="site")
     p.add_argument("--publish_status", default=DEFAULT_PUBLISH_STATUS)
     p.add_argument("--tags", default=None)
+    p.add_argument(
+        "--check-provider",
+        action="store_true",
+        help="Print the resolved provider configuration and exit (0 ready, 3 not configured, 4 provider retired).",
+    )
+    p.add_argument(
+        "--allow-skip",
+        action="store_true",
+        help="Exit successfully with a warning when no LLM credential is configured (scheduled runs).",
+    )
     args = p.parse_args()
+
+    if args.check_provider:
+        report = provider_report()
+        for key, value in report.items():
+            print(f"{key}: {value}")
+        return 0 if report["ready"] else 4 if report["provider"].startswith("github_models") else 3
+
+    try:
+        reason = missing_configuration()
+    except ProviderRetired as exc:
+        _annotate("error", str(exc))
+        return 4
+    except ProviderError as exc:
+        _annotate("error", str(exc))
+        return 3
+
+    if reason:
+        if args.allow_skip:
+            _annotate("warning", f"Skipping today's post: {reason}")
+            _write_step_summary(
+                "**Skipped: no LLM provider credential.**\n\n"
+                f"{reason}\n\n"
+                "Add `LLM_API_KEY` (or `OPENAI_API_KEY`) as a repository secret and, for "
+                "non-OpenAI endpoints, `LLM_BASE_URL` / `LLM_MODEL` as repository variables."
+            )
+            print("No post generated (provider not configured).")
+            return 0
+        _annotate("error", reason)
+        return 3
 
     topic = args.topic or default_topic()
 
-    art = generate_article(topic)
+    try:
+        art = generate_article(topic)
+    except ProviderRetired as exc:
+        _annotate("error", str(exc))
+        return 4
+    except ProviderError as exc:
+        _annotate("error", str(exc))
+        return 3
+    except RuntimeError as exc:
+        _annotate("error", str(exc))
+        return 1
+
     md = art["markdown"]
 
     title = extract_title(md)
@@ -421,7 +649,7 @@ def main():
         print(saved)
         print(html_saved)
         print(index_saved)
-        return
+        return 0
 
     # publish or generate_and_publish
     if not MEDIUM_TOKEN:
@@ -434,7 +662,8 @@ def main():
     tags = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else None
     resp = publish_to_medium(MEDIUM_TOKEN, user_id, title, md, publish_status=args.publish_status, tags=tags)
     print("Published:", resp)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
