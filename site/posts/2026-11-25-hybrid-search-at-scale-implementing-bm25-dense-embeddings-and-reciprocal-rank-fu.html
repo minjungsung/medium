@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Hybrid Search at Scale: Implementing BM25, Dense Embeddings, and Reciprocal Rank Fusion in Go</title>
+  <style>
+    /* Minimal styles for copy/paste/import */
+    body { margin: 0; font: 16px/1.7 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #111; }
+    main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+    article > h1 { margin: 0 0 16px; line-height: 1.2; }
+    pre { overflow: auto; padding: 12px; background: #f6f8fa; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.95em; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: 6px 8px; }
+    a { word-break: break-word; }
+  </style>
+</head>
+<body>
+  <main>
+    <article>
+      <h1>Hybrid Search at Scale: Implementing BM25, Dense Embeddings, and Reciprocal Rank Fusion in Go</h1>
+      <p><em>A senior engineer's guide to engineering a sub-50ms hybrid retrieval pipeline using Go, inverted indices, vector quantization, and stateless RRF scoring.</em></p>
+<hr>
+<h2>The Production Constraint</h2>
+<p>We are building the retrieval service for an enterprise code-intelligence platform. The corpus consists of 50 million software repository documents (average size: 2KB of mixed markdown documentation and Go source code). </p>
+<p>Our P99 latency SLA is strict: <strong>50ms</strong>. 
+Our throughput requirement is <strong>1,200 requests/second</strong> at peak. </p>
+<p>Pure lexical search (BM25) fails on semantic intent (e.g., searching for "database connection pooling" misses files referencing <code>sql.DB</code> configuration). Pure dense vector search (HNSW over 1536-dimensional embeddings) fails on exact keyword matching (e.g., searching for a specific error string like <code>ErrTxDone</code> returns semantically related transactional code that lacks the exact literal identifier). </p>
+<p>We must implement a hybrid search architecture combining BM25 and dense embeddings, merged via Reciprocal Rank Fusion (RRF), running in-memory within a custom Go service.</p>
+<hr>
+<h2>Architectural Reasoning Chain</h2>
+<ol>
+<li><strong>Constraints &amp; Bottlenecks</strong>: Network hops between a separate lexical service and a vector DB destroy our 50ms budget. We must co-locate both indices in-memory inside a unified Go process.</li>
+<li><strong>Dense Index Strategy</strong>: Storing raw float32 vectors for 50M documents requires $50M \times 1536 \times 4 \text{ bytes} \approx 307 \text{ GB}$ of RAM, strictly violating our memory efficiency targets. We will use Product Quantization (PQ) compressed vectors to fit the index into $&lt;32 \text{ GB}$ of RAM.</li>
+<li><strong>Lexical Index Strategy</strong>: Standard inverted indices via bleve or custom bitmap-backed posting lists using roaring bitmaps.</li>
+<li><strong>Fusion Strategy</strong>: Score normalization between BM25 (unbounded positive floats) and cosine similarity distances $[-1, 1]$ is notoriously brittle across shifting query distributions. We abandon score normalization entirely in favor of Reciprocal Rank Fusion (RRF), operating purely on ordinal ranks.</li>
+</ol>
+<hr>
+<h2>System Design &amp; Implementation</h2>
+<p>The architecture queries both the BM25 inverted index and the quantized vector index concurrently using goroutines, retrieves top-$K$ candidates from each, and streams them into a lock-free RRF aggregation pipeline.</p>
+<pre><code class="language-go">package hybrid
+
+import (
+    &quot;context&quot;
+    &quot;math&quot;
+    &quot;sort&quot;
+    &quot;sync&quot;
+)
+
+type DocumentID uint64
+
+type ScoredDoc struct {
+    ID    DocumentID
+    Score float64
+}
+
+type SearchResult struct {
+    ID    DocumentID
+    RRF   float64
+}
+
+// LexicalSearcher represents our in-memory BM25 index.
+type LexicalSearcher interface {
+    Search(ctx context.Context, query string, topK int) ([]ScoredDoc, error)
+}
+
+// DenseSearcher represents our quantized vector index.
+type DenseSearcher interface {
+    Search(ctx context.Context, vector []float32, topK int) ([]ScoredDoc, error)
+}
+
+type HybridEngine struct {
+    lexical LexicalSearcher
+    dense   DenseSearcher
+    rrfK    float64
+}
+
+func NewHybridEngine(lex LexicalSearcher, den DenseSearcher, rrfK float64) *HybridEngine {
+    return &amp;HybridEngine{
+        lexical: lex,
+        dense:   den,
+        rrfK:    rrfK,
+    }
+}
+
+func (h *HybridEngine) Search(ctx context.Context, queryText string, queryVec []float32, topK int) ([]SearchResult, error) {
+    ctx, cancel := context.WithCancel(ctx)
+    defer cancel()
+
+    var (
+        wg         sync.WaitGroup
+        lexResults []ScoredDoc
+        denseResults []ScoredDoc
+        lexErr, denErr error
+    )
+
+    wg.Add(2)
+
+    go func() {
+        defer wg.Done()
+        var err error
+        lexResults, err = h.lexical.Search(ctx, queryText, topK*2)
+        if err != nil {
+            lexErr = err
+        }
+    }()
+
+    go func() {
+        defer wg.Done()
+        var err error
+        denseResults, err = h.dense.Search(ctx, queryVec, topK*2)
+        if err != nil {
+            denErr = err
+        }
+    }()
+
+    wg.Wait()
+
+    if lexErr != nil {
+        return nil, lexErr
+    }
+    if denErr != nil {
+        return nil, denErr
+    }
+
+    return fuseRRF(lexResults, denseResults, h.rrfK, topK), nil
+}
+
+func fuseRRF(lex, dense []ScoredDoc, k float64, topK int) []SearchResult {
+    scores := make(map[DocumentID]float64)
+
+    // Process Lexical Ranks
+    for rank, doc := range lex {
+        r := float64(rank + 1)
+        scores[doc.ID] += 1.0 / (k + r)
+    }
+
+    // Process Dense Ranks
+    for rank, doc := range dense {
+        r := float64(rank + 1)
+        scores[doc.ID] += 1.0 / (k + r)
+    }
+
+    results := make([]SearchResult, 0, len(scores))
+    for id, score := range scores {
+        results = append(results, SearchResult{ID: id, RRF: score})
+    }
+
+    sort.Slice(results, func(i, j int) bool {
+        return results[i].RRF &gt; results[j].RRF
+    })
+
+    if len(results) &gt; topK {
+        results = results[:topK]
+    }
+
+    return results
+}
+</code></pre>
+<h3>Handling Tie-Breakers and Long-Tail Distribution in RRF</h3>
+<p>A subtle edge case in production RRF implementations occurs when documents receive identical R</p>
+    </article>
+  </main>
+</body>
+</html>
